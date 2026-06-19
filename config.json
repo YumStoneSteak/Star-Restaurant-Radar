@@ -1,0 +1,27 @@
+{
+  "instagram_username": "byeolsikdang",
+  "notification_time": "10:00",
+  "enabled_weekdays": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "exclude_korean_holidays": true,
+  "only_today_posts": false,
+  "prevent_duplicate": true,
+  "fallback_link_only_notification": true,
+  "notification_mode": "windows_toast",
+  "open_detail_on_click": true,
+  "cache_dir": "cache",
+  "log_dir": "logs",
+  "client_mode": "auto",
+  "mock_on_web_failure": false,
+  "use_instagram_login_session": true,
+  "instagram_session_dir": "instagram_session",
+  "test_post_url": "",
+  "test_image_url": "",
+  "holiday_failure_mode": "continue",
+  "start_on_boot": false
+}
