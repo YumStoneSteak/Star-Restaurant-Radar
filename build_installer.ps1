@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "1.0.0",
+  [string]$Version = "1.1.0",
   [string]$MakensisPath = ""
 )
 
@@ -22,7 +22,9 @@ function Find-Makensis {
   $Candidates = @(
     "C:\Program Files\NSIS\makensis.exe",
     "C:\Program Files (x86)\NSIS\makensis.exe",
-    (Join-Path $Root "tools\nsis\makensis.exe")
+    (Join-Path $Root "tools\nsis\makensis.exe"),
+    (Join-Path $Root "tools\nsis-3.12\makensis.exe"),
+    (Join-Path $Root "tools\nsis-3.12\Bin\makensis.exe")
   )
   foreach ($Candidate in $Candidates) {
     if (Test-Path $Candidate) {
@@ -36,8 +38,11 @@ function Find-Makensis {
 $Makensis = Find-Makensis -PreferredPath $MakensisPath
 
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "build.ps1")
+if ($LASTEXITCODE -ne 0) {
+  throw "PyInstaller build failed. exit=$LASTEXITCODE"
+}
 
-$InstallerPath = Join-Path $Root "dist\Star-Restaurant-Radar-Setup-v$Version.exe"
+$InstallerPath = Join-Path $Root "dist\StarRestaurantRadar-Setup-v$Version.exe"
 if (Test-Path $InstallerPath) {
   Remove-Item -LiteralPath $InstallerPath -Force
 }

@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "StarRestaurantRadar"
-APP_TITLE = "스타 레스토랑 레이더"
-APP_PRODUCT_NAME = "Star Restaurant Radar"
-APP_VERSION = "1.0.0"
+APP_TITLE = "StarRestaurantRadar"
+APP_TOAST_APP_ID = "StarRestaurantRadar"
+APP_PRODUCT_NAME = "StarRestaurantRadar"
+APP_VERSION = "1.1.0"
 GITHUB_REPO = "YumStoneSteak/Star-Restaurant-Radar"
 LEGACY_APP_NAMES = ("ByeolsikdangNotifier",)
 if getattr(sys, "frozen", False):
@@ -49,7 +50,7 @@ class AppConfig:
     test_post_url: str = ""
     test_image_url: str = ""
     holiday_failure_mode: str = "continue"
-    start_on_boot: bool = False
+    start_on_boot: bool = True
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":

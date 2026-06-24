@@ -7,6 +7,7 @@ import webbrowser
 from pathlib import Path
 
 from config import BASE_DIR, AppConfig
+from image_cache import ImageCacheService
 from instagram_client import InstagramPost
 
 LOGGER = logging.getLogger(__name__)
@@ -72,11 +73,12 @@ class ToastService:
                 "--permalink",
                 permalink,
             ]
-        if image_path and image_path.exists():
+        toast_image_path = self._prepare_toast_image(image_path)
+        if toast_image_path and toast_image_path.exists():
             if getattr(sys, "frozen", False):
-                command.extend(["--toast-image", str(image_path)])
+                command.extend(["--toast-image", str(toast_image_path)])
             else:
-                command.extend(["--image", str(image_path)])
+                command.extend(["--image", str(toast_image_path)])
 
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
@@ -92,6 +94,11 @@ class ToastService:
         except OSError:
             LOGGER.exception("Could not launch toast worker.")
             return None
+
+    def _prepare_toast_image(self, image_path: Path | None) -> Path | None:
+        if not image_path or not image_path.exists():
+            return None
+        return ImageCacheService(self.config).create_toast_image(image_path) or image_path
 
     def _show_with_powershell(self, title: str, body: str) -> str | None:
         script = (

@@ -13,10 +13,13 @@ LOGGER = logging.getLogger(__name__)
 
 
 class ImageCacheService:
+    TOAST_IMAGE_ZOOM = 1.1
+
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.cache_dir = config.cache_path
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.toast_cache_dir = self.cache_dir / "toast"
 
     def cache_post_image(self, post: InstagramPost, allow_placeholder: bool = False) -> Path | None:
         if post.image_url:
@@ -29,11 +32,61 @@ class ImageCacheService:
 
     def clear_cache(self) -> int:
         removed = 0
-        for path in self.cache_dir.glob("*"):
+        for path in self.cache_dir.rglob("*"):
             if path.is_file():
                 path.unlink()
                 removed += 1
+        for path in sorted((path for path in self.cache_dir.rglob("*") if path.is_dir()), reverse=True):
+            try:
+                path.rmdir()
+            except OSError:
+                pass
         return removed
+
+    def create_toast_image(self, source_path: Path | None) -> Path | None:
+        if not source_path or not source_path.exists():
+            return None
+
+        target = self.toast_cache_dir / f"{safe_filename(source_path.stem)}-toast.jpg"
+        if target.exists() and target.stat().st_mtime >= source_path.stat().st_mtime:
+            return target
+
+        try:
+            from PIL import Image, ImageOps
+        except ImportError:
+            LOGGER.info("Pillow is not installed; toast image zoom is skipped.")
+            return None
+
+        try:
+            self.toast_cache_dir.mkdir(parents=True, exist_ok=True)
+            with Image.open(source_path) as image:
+                image = ImageOps.exif_transpose(image)
+                width, height = image.size
+                if width <= 0 or height <= 0:
+                    return None
+
+                crop_width = max(1, round(width / self.TOAST_IMAGE_ZOOM))
+                crop_height = max(1, round(height / self.TOAST_IMAGE_ZOOM))
+                left = max(0, (width - crop_width) // 2)
+                top = max(0, (height - crop_height) // 2)
+                cropped = image.crop((left, top, left + crop_width, top + crop_height))
+                resized = cropped.resize((width, height), Image.Resampling.LANCZOS)
+
+                if resized.mode not in {"RGB", "L"}:
+                    background = Image.new("RGB", resized.size, "#ffffff")
+                    if "A" in resized.getbands():
+                        background.paste(resized, mask=resized.getchannel("A"))
+                    else:
+                        background.paste(resized)
+                    resized = background
+                else:
+                    resized = resized.convert("RGB")
+
+                resized.save(target, format="JPEG", quality=90, optimize=True)
+                return target
+        except Exception:
+            LOGGER.exception("Toast image zoom failed: %s", source_path)
+            return None
 
     def _download_image(self, image_url: str, post_id: str) -> Path | None:
         suffix = self._guess_suffix(image_url)
@@ -101,4 +154,3 @@ class ImageCacheService:
 
 def safe_filename(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._") or "post"
-

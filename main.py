@@ -19,7 +19,7 @@ def run_once(force_mock: bool = False, force_notify: bool = False) -> int:
     setup_logging(config, quiet=True)
     state_store = StateStore()
     state_store.update(last_checked_at=iso_now(), last_error=None)
-    LOGGER.info("Byeolsikdang notifier started.")
+    LOGGER.info("StarRestaurantRadar started.")
 
     try:
         today = datetime.now(KST).date()
@@ -117,7 +117,7 @@ def run_once(force_mock: bool = False, force_notify: bool = False) -> int:
             last_image_path=str(image_path) if image_path else None,
             last_result=result,
         )
-        LOGGER.info("Byeolsikdang notifier finished: %s", result)
+        LOGGER.info("StarRestaurantRadar finished: %s", result)
         return 0
     except Exception as exc:
         LOGGER.exception("Notifier failed.")

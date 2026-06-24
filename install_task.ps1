@@ -22,16 +22,16 @@ $PackagedExe = Join-Path $Root "dist\StarRestaurantRadar\StarRestaurantRadar.exe
 $LegacyTaskName = "ByeolsikdangNotifier"
 $WorkspaceVenvPython = Join-Path (Split-Path -Parent $Root) "v\Scripts\python.exe"
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
-$MainPy = Join-Path $Root "main.py"
+$AppPy = Join-Path $Root "app.py"
 
 if (Test-Path $OneFileExe) {
-  $Action = New-ScheduledTaskAction -Execute $OneFileExe -Argument "--run-once" -WorkingDirectory (Split-Path -Parent $OneFileExe)
+  $Action = New-ScheduledTaskAction -Execute $OneFileExe -Argument "--scheduled-check" -WorkingDirectory (Split-Path -Parent $OneFileExe)
 } elseif (Test-Path $PackagedExe) {
-  $Action = New-ScheduledTaskAction -Execute $PackagedExe -Argument "--run-once" -WorkingDirectory $Root
+  $Action = New-ScheduledTaskAction -Execute $PackagedExe -Argument "--scheduled-check" -WorkingDirectory $Root
 } elseif (Test-Path $WorkspaceVenvPython) {
-  $Action = New-ScheduledTaskAction -Execute $WorkspaceVenvPython -Argument "`"$MainPy`"" -WorkingDirectory $Root
+  $Action = New-ScheduledTaskAction -Execute $WorkspaceVenvPython -Argument "`"$AppPy`" --scheduled-check" -WorkingDirectory $Root
 } elseif (Test-Path $VenvPython) {
-  $Action = New-ScheduledTaskAction -Execute $VenvPython -Argument "`"$MainPy`"" -WorkingDirectory $Root
+  $Action = New-ScheduledTaskAction -Execute $VenvPython -Argument "`"$AppPy`" --scheduled-check" -WorkingDirectory $Root
 } else {
   $Python = (Get-Command python -ErrorAction SilentlyContinue).Source
   if (-not $Python) {
@@ -40,7 +40,7 @@ if (Test-Path $OneFileExe) {
   if (-not $Python) {
     throw "python or py command was not found. Install Python 3.12 or later."
   }
-  $Action = New-ScheduledTaskAction -Execute $Python -Argument "`"$MainPy`"" -WorkingDirectory $Root
+  $Action = New-ScheduledTaskAction -Execute $Python -Argument "`"$AppPy`" --scheduled-check" -WorkingDirectory $Root
 }
 
 $At = [datetime]::ParseExact($NotifyTime, "HH:mm", $null)
@@ -54,5 +54,5 @@ if ($LegacyTaskName -ne $TaskName) {
   }
 }
 
-Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Description "Star Restaurant Radar" -Force | Out-Null
+Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Description "StarRestaurantRadar" -Force | Out-Null
 Write-Host "$TaskName scheduled task registered for weekdays at $NotifyTime."

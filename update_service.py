@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -13,8 +14,16 @@ from urllib.request import Request, urlopen
 
 from config import APP_PRODUCT_NAME, APP_VERSION, GITHUB_REPO
 
+try:
+    import certifi as certifi_provider
+except ImportError:  # pragma: no cover - dependency is packaged, fallback keeps source runs usable.
+    try:
+        from pip._vendor import certifi as certifi_provider  # type: ignore[no-redef]
+    except ImportError:
+        certifi_provider = None  # type: ignore[assignment]
+
 GITHUB_API_LATEST_RELEASE = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-INSTALLER_NAME_RE = re.compile(r"Star-Restaurant-Radar-Setup-v\d+\.\d+\.\d+\.exe$", re.IGNORECASE)
+INSTALLER_NAME_RE = re.compile(r"StarRestaurantRadar-Setup-v\d+\.\d+\.\d+\.exe$", re.IGNORECASE)
 
 
 class UpdateError(RuntimeError):
@@ -56,13 +65,19 @@ def fetch_latest_release(timeout: int = 20) -> dict[str, object]:
         },
     )
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with open_https(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         if exc.code == 404:
             raise UpdateError("GitHub 릴리즈를 찾지 못했습니다.") from exc
         raise UpdateError(f"GitHub 릴리즈 조회 실패: HTTP {exc.code}") from exc
     except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        if is_certificate_verify_error(exc):
+            raise UpdateError(
+                "GitHub 릴리즈 조회 실패: 인증서 검증에 실패했습니다. "
+                "앱에 포함된 인증서 묶음으로 다시 시도하도록 수정되었습니다. "
+                "문제가 계속되면 Windows 날짜/시간 또는 보안 프로그램의 HTTPS 검사를 확인해 주세요."
+            ) from exc
         raise UpdateError(f"GitHub 릴리즈 조회 실패: {exc}") from exc
 
 
@@ -157,9 +172,14 @@ def download_asset(asset: ReleaseAsset, target_path: Path, timeout: int = 60) ->
         raise UpdateError(f"다운로드 URL이 비어 있습니다: {asset.name}")
     request = Request(asset.browser_download_url, headers={"User-Agent": f"{APP_PRODUCT_NAME}/{APP_VERSION}"})
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with open_https(request, timeout=timeout) as response:
             data = response.read()
     except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        if is_certificate_verify_error(exc):
+            raise UpdateError(
+                f"다운로드 실패: {asset.name}: 인증서 검증에 실패했습니다. "
+                "Windows 날짜/시간 또는 보안 프로그램의 HTTPS 검사를 확인해 주세요."
+            ) from exc
         raise UpdateError(f"다운로드 실패: {asset.name}: {exc}") from exc
     try:
         target_path.write_bytes(data)
@@ -197,3 +217,18 @@ def install_update(installer_path: Path) -> subprocess.Popen:
 
 def running_from_frozen_app() -> bool:
     return bool(getattr(sys, "frozen", False))
+
+
+def open_https(request: Request, timeout: int):
+    return urlopen(request, timeout=timeout, context=create_ssl_context())
+
+
+def create_ssl_context() -> ssl.SSLContext:
+    if certifi_provider:
+        return ssl.create_default_context(cafile=certifi_provider.where())
+    return ssl.create_default_context()
+
+
+def is_certificate_verify_error(exc: BaseException) -> bool:
+    reason = getattr(exc, "reason", exc)
+    return isinstance(reason, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(exc)

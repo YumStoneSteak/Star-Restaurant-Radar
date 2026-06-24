@@ -22,14 +22,14 @@ def task_days(config: AppConfig) -> str:
 
 def task_target() -> tuple[str, str]:
     if getattr(sys, "frozen", False):
-        return sys.executable, "--run-once"
+        return sys.executable, "--scheduled-check"
     onefile = BASE_DIR / "dist" / f"{APP_NAME}.exe"
     if onefile.exists():
-        return str(onefile), "--run-once"
+        return str(onefile), "--scheduled-check"
     packaged = BASE_DIR / "dist" / APP_NAME / f"{APP_NAME}.exe"
     if packaged.exists():
-        return str(packaged), "--run-once"
-    return sys.executable, f'"{BASE_DIR / "main.py"}"'
+        return str(packaged), "--scheduled-check"
+    return sys.executable, f'"{BASE_DIR / "app.py"}" --scheduled-check'
 
 
 def register_task(config: AppConfig) -> subprocess.CompletedProcess[str]:

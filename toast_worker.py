@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from config import APP_TOAST_APP_ID
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Show a Windows toast notification.")
@@ -19,7 +21,7 @@ def main() -> int:
 def show_toast(title: str, body: str, permalink: str = "", image: str = "") -> None:
     from win11toast import toast
 
-    kwargs: dict[str, object] = {"duration": "short"}
+    kwargs: dict[str, object] = {"duration": "short", "app_id": APP_TOAST_APP_ID}
     if permalink:
         kwargs["on_click"] = permalink
         kwargs["button"] = {
@@ -29,12 +31,12 @@ def show_toast(title: str, body: str, permalink: str = "", image: str = "") -> N
         }
     image_path = Path(image) if image else None
     if image_path and image_path.exists():
-        kwargs["image"] = str(image_path)
+        kwargs["image"] = {"placement": "hero", "src": str(image_path)}
 
     try:
         toast(title, body, **kwargs)
     except Exception:
-        toast(title, body, duration="short")
+        toast(title, body, duration="short", app_id=APP_TOAST_APP_ID)
 
 
 if __name__ == "__main__":

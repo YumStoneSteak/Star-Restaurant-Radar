@@ -18,15 +18,17 @@ from update_service import UpdateError, check_for_update, download_update_instal
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Byeolsikdang menu notifier")
+    parser = argparse.ArgumentParser(description="StarRestaurantRadar")
     parser.add_argument("--detail", help="Open detail window for a post id")
     parser.add_argument("--open-url", help="Open a URL in the default browser")
     parser.add_argument("--test-run", action="store_true", help="Run one forced mock notification")
     parser.add_argument("--run-once", action="store_true", help="Run one normal notification check and exit")
+    parser.add_argument("--scheduled-check", action="store_true", help="Run a scheduled check with a visible tray app")
     parser.add_argument("--force-notify", action="store_true", help="Ignore date and duplicate guards when used with --run-once")
     parser.add_argument("--login-instagram", action="store_true", help="Create a local Instagram login session")
     parser.add_argument("--check-latest", action="store_true", help="Check the latest Instagram post and print the result")
     parser.add_argument("--minimized", action="store_true", help="Start in the system tray without showing settings")
+    parser.add_argument("--first-run", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--tray-smoke-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--ui-layout-smoke-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--toast-worker", action="store_true", help=argparse.SUPPRESS)
@@ -52,6 +54,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_once(force_notify=args.force_notify)
     if args.test_run:
         return run_once(force_mock=True, force_notify=True)
+    if args.scheduled_check:
+        if not acquire_tray_instance():
+            return run_once()
+        return run_settings_app(start_minimized=True, scheduled_check=True)
     if args.login_instagram:
         from instagram_client import create_login_session
 
@@ -63,7 +69,35 @@ def main(argv: list[str] | None = None) -> int:
         return run_settings_app(start_minimized=True, smoke_test=True)
     if args.ui_layout_smoke_test:
         return run_settings_app(start_minimized=True, ui_layout_test=True)
-    return run_settings_app(start_minimized=args.minimized)
+    if not acquire_tray_instance():
+        return 0
+    return run_settings_app(start_minimized=args.minimized, first_run=args.first_run)
+
+
+_TRAY_MUTEX_HANDLE = None
+
+
+def acquire_tray_instance() -> bool:
+    if os.name != "nt":
+        return True
+
+    import ctypes
+
+    global _TRAY_MUTEX_HANDLE
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_bool
+
+    handle = kernel32.CreateMutexW(None, False, f"Local\\{APP_NAME}Tray")
+    if not handle:
+        return True
+    if ctypes.get_last_error() == 183:
+        kernel32.CloseHandle(handle)
+        return False
+    _TRAY_MUTEX_HANDLE = handle
+    return True
 
 
 def check_latest_cli() -> int:
@@ -119,9 +153,15 @@ def set_start_on_boot(enabled: bool) -> None:
                 pass
 
 
-def run_settings_app(start_minimized: bool = False, smoke_test: bool = False, ui_layout_test: bool = False) -> int:
+def run_settings_app(
+    start_minimized: bool = False,
+    first_run: bool = False,
+    smoke_test: bool = False,
+    ui_layout_test: bool = False,
+    scheduled_check: bool = False,
+) -> int:
     try:
-        from PySide6.QtCore import QTime, Qt
+        from PySide6.QtCore import QTimer, QTime, Qt
         from PySide6.QtGui import QAction, QIcon
         from PySide6.QtWidgets import (
             QApplication,
@@ -150,9 +190,13 @@ def run_settings_app(start_minimized: bool = False, smoke_test: bool = False, ui
     from glass_window import APP_QSS, apply_glass_effect
 
     class SettingsWindow(QWidget):
-        def __init__(self) -> None:
+        def __init__(self, auto_apply: bool = True) -> None:
             super().__init__()
+            self.auto_apply = auto_apply
+            self.pending_apply_message: str | None = None
             self.config = load_config()
+            if first_run and not self.config.start_on_boot:
+                self.config.start_on_boot = True
             setup_logging(self.config)
             self.state_store = StateStore()
             self.really_quit = False
@@ -203,6 +247,9 @@ def run_settings_app(start_minimized: bool = False, smoke_test: bool = False, ui
             self.time_input.setDisplayFormat("HH:mm")
             self.start_on_boot = QCheckBox("컴퓨터 부팅 시 자동 실행")
             self.start_on_boot.setChecked(self.config.start_on_boot)
+            self.apply_timer = QTimer(self)
+            self.apply_timer.setSingleShot(True)
+            self.apply_timer.timeout.connect(self.apply_settings)
 
             self._add_field_pair(settings_layout, 0, 0, "대상 계정", self.target_label)
             self._add_field_pair(settings_layout, 1, 0, "알림 시간", self.time_input)
@@ -220,7 +267,6 @@ def run_settings_app(start_minimized: bool = False, smoke_test: bool = False, ui
             button_layout.setContentsMargins(26, 26, 26, 26)
             button_layout.setSpacing(16)
             buttons = [
-                ("저장하고 알림 시간 적용", self.save_settings),
                 ("최신 게시물 지금 확인", self.check_latest_now),
                 ("Instagram 로그인 세션 만들기", self.create_login_session),
                 ("업데이트 확인", self.check_updates),
@@ -240,7 +286,11 @@ def run_settings_app(start_minimized: bool = False, smoke_test: bool = False, ui
             self.status.setMinimumHeight(180)
             root.addWidget(self.status)
             self.create_tray_icon()
+            self.time_input.timeChanged.connect(lambda _time: self.queue_settings_apply("알림 시간이 적용되었습니다."))
+            self.start_on_boot.toggled.connect(lambda _checked: self.queue_settings_apply("자동 실행 설정이 적용되었습니다."))
             self.refresh_status()
+            if self.auto_apply:
+                self.apply_settings(show_message=first_run)
 
         def _card(self, minimum_height: int | None = None) -> QFrame:
             frame = QFrame()
@@ -297,15 +347,26 @@ def run_settings_app(start_minimized: bool = False, smoke_test: bool = False, ui
             save_config(self.config)
             set_start_on_boot(self.config.start_on_boot)
 
-        def save_settings(self) -> None:
+        def queue_settings_apply(self, message: str | None = None) -> None:
+            self.pending_apply_message = message
+            if not self.auto_apply:
+                return
+            self.apply_timer.start(350)
+
+        def apply_settings(self, show_message: bool = True) -> None:
             self._save_settings()
             result = register_task(self.config)
             if result.returncode == 0:
-                message = "설정을 저장하고 알림 시간을 적용했습니다."
+                message = self.pending_apply_message or "설정이 자동 적용되었습니다."
             else:
                 message = f"설정은 저장했지만 알림 시간 적용에 실패했습니다: {result.stderr or result.stdout}"
-            self.refresh_status(message)
-            self.notify_tray(message)
+                show_message = True
+            self.pending_apply_message = None
+            if show_message:
+                self.refresh_status(message)
+                self.notify_tray(message)
+            else:
+                self.refresh_status()
 
         def send_test_notification(self) -> None:
             self._save_settings()
@@ -335,7 +396,7 @@ def run_settings_app(start_minimized: bool = False, smoke_test: bool = False, ui
 
         def create_login_session(self) -> None:
             self._save_settings()
-            self.refresh_status("Instagram 로그인 세션용 Chrome 창을 여는 중입니다...")
+            self.refresh_status("Instagram 로그인 세션용 브라우저 창을 여는 중입니다...")
             QApplication.processEvents()
             try:
                 open_instagram_login_session(self.config)
@@ -344,7 +405,9 @@ def run_settings_app(start_minimized: bool = False, smoke_test: bool = False, ui
                 self.refresh_status(f"Instagram 로그인 세션 창 열기 실패: {exc}")
                 self.notify_tray("Instagram 로그인 세션 창 열기에 실패했습니다.")
                 return
-            self.refresh_status("Instagram 로그인 세션 창을 열었습니다. 로그인 후 Chrome 창을 닫아 주세요.")
+            self.refresh_status(
+                "Instagram 로그인 세션 창을 열었습니다. 실제로 로그인한 뒤 프로필이 보이면 브라우저 창을 닫아 주세요."
+            )
             self.notify_tray("Instagram 로그인 세션 창을 열었습니다.")
 
         def check_updates(self) -> None:
@@ -396,6 +459,14 @@ def run_settings_app(start_minimized: bool = False, smoke_test: bool = False, ui
             self.refresh_status(f"캐시 파일 {removed}개를 삭제했습니다.")
             self.notify_tray(f"캐시 파일 {removed}개를 삭제했습니다.")
 
+        def run_scheduled_check(self) -> None:
+            self.refresh_status("예약된 알림 확인을 실행합니다.")
+            QApplication.processEvents()
+            result = run_once()
+            self.refresh_status(f"예약된 알림 확인 완료: exit {result}")
+            if result != 0:
+                self.notify_tray("예약된 알림 확인에 실패했습니다.")
+
         def notify_tray(self, message: str, title: str = APP_TITLE, timeout: int = 2500) -> None:
             tray_icon = getattr(self, "tray_icon", None)
             if tray_icon and tray_icon.isVisible():
@@ -441,6 +512,8 @@ def run_settings_app(start_minimized: bool = False, smoke_test: bool = False, ui
             QApplication.instance().quit()
 
         def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+            if self.auto_apply:
+                self.apply_settings(show_message=False)
             if self.really_quit or not QSystemTrayIcon.isSystemTrayAvailable():
                 event.accept()
                 return
@@ -471,7 +544,11 @@ def run_settings_app(start_minimized: bool = False, smoke_test: bool = False, ui
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    window = SettingsWindow()
+    window = SettingsWindow(auto_apply=not (smoke_test or ui_layout_test))
+    if scheduled_check and not QSystemTrayIcon.isSystemTrayAvailable():
+        window.really_quit = True
+        window.close()
+        return run_once()
     if smoke_test:
         expected_actions = [
             "설정창 열기",
@@ -556,11 +633,14 @@ def run_settings_app(start_minimized: bool = False, smoke_test: bool = False, ui
         print("UI layout smoke test passed")
         return 0
 
-    if start_minimized and QSystemTrayIcon.isSystemTrayAvailable():
+    if scheduled_check:
+        QTimer.singleShot(0, window.run_scheduled_check)
+
+    if (start_minimized or scheduled_check) and QSystemTrayIcon.isSystemTrayAvailable():
         window.hide()
         window.tray_icon.showMessage(
             APP_TITLE,
-            "트레이에서 실행 중입니다.",
+            "StarRestaurantRadar is running in the tray.",
             QSystemTrayIcon.MessageIcon.Information,
             2000,
         )

@@ -1,12 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import importlib.util
+
+from PyInstaller.utils.hooks import collect_data_files
+
+
+if importlib.util.find_spec('certifi') is not None:
+    certifi_datas = collect_data_files('certifi')
+    certifi_hiddenimports = ['certifi']
+elif importlib.util.find_spec('pip._vendor.certifi') is not None:
+    certifi_datas = collect_data_files('pip._vendor.certifi')
+    certifi_hiddenimports = ['pip._vendor.certifi']
+else:
+    certifi_datas = []
+    certifi_hiddenimports = []
+
 
 a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets')],
-    hiddenimports=[],
+    datas=[('assets', 'assets'), *certifi_datas],
+    hiddenimports=certifi_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

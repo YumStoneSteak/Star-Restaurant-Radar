@@ -8,15 +8,15 @@ RequestExecutionLevel user
 
 !define APP_ID "StarRestaurantRadar"
 !define APP_EXE "StarRestaurantRadar.exe"
-!define APP_DISPLAY_NAME "스타 레스토랑 레이더"
-!define APP_PRODUCT_NAME "Star Restaurant Radar"
-!define APP_VERSION "1.0.0"
+!define APP_DISPLAY_NAME "StarRestaurantRadar"
+!define APP_PRODUCT_NAME "StarRestaurantRadar"
+!define APP_VERSION "1.1.0"
 !define APP_PUBLISHER "YumStoneSteak"
 !define APP_REPO_URL "https://github.com/YumStoneSteak/Star-Restaurant-Radar"
 !define BUILD_DIR "..\dist\StarRestaurantRadar"
 
 Name "${APP_DISPLAY_NAME}"
-OutFile "..\dist\Star-Restaurant-Radar-Setup-v${APP_VERSION}.exe"
+OutFile "..\dist\StarRestaurantRadar-Setup-v${APP_VERSION}.exe"
 InstallDir "$LOCALAPPDATA\Programs\${APP_PRODUCT_NAME}"
 InstallDirRegKey HKCU "Software\${APP_ID}" "InstallDir"
 
@@ -32,9 +32,10 @@ InstallDirRegKey HKCU "Software\${APP_ID}" "InstallDir"
 !insertmacro MUI_LANGUAGE "English"
 
 Var LaunchAfterInstall
+Var FirstInstall
 
 Function .onInit
-  StrCpy $LaunchAfterInstall "0"
+  StrCpy $LaunchAfterInstall "1"
   ${GetParameters} $R0
   ${GetOptions} $R0 "/LAUNCH=" $R1
   IfErrors done
@@ -45,10 +46,16 @@ FunctionEnd
 Section "Install"
   SetShellVarContext current
   SetOutPath "$INSTDIR"
+  StrCpy $FirstInstall "1"
+  ReadRegStr $R2 HKCU "Software\${APP_ID}" "InstallDir"
+  IfErrors firstInstallDetected 0
+  StrCpy $FirstInstall "0"
+firstInstallDetected:
 
   ExecWait 'taskkill /IM "${APP_EXE}" /F'
   ExecWait 'taskkill /IM "ByeolsikdangNotifier.exe" /F'
   ExecWait 'schtasks /Delete /F /TN "ByeolsikdangNotifier"'
+  RMDir /r "$SMPROGRAMS\Star Restaurant Radar"
 
   Delete "$INSTDIR\${APP_EXE}"
   RMDir /r "$INSTDIR\_internal"
@@ -72,6 +79,11 @@ Section "Install"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   StrCmp $LaunchAfterInstall "1" 0 done
+  StrCmp $FirstInstall "1" launchFirstRun launchMinimized
+launchFirstRun:
+  Exec '"$INSTDIR\${APP_EXE}" --first-run'
+  Goto done
+launchMinimized:
   Exec '"$INSTDIR\${APP_EXE}" --minimized'
 done:
 SectionEnd

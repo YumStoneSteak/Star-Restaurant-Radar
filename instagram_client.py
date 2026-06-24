@@ -452,7 +452,7 @@ def create_login_session(config: AppConfig) -> subprocess.Popen:
     profile_url = WebInstagramClient.PROFILE_URL.format(username=username)
     chrome_path = find_chrome_executable()
     if not chrome_path:
-        raise InstagramClientError("Chrome 실행 파일을 찾지 못했습니다. Chrome 설치 후 다시 시도해 주세요.")
+        raise InstagramClientError("Chrome 또는 Microsoft Edge 실행 파일을 찾지 못했습니다. Chrome 또는 Edge 설치 후 다시 시도해 주세요.")
 
     command = [
         chrome_path,
@@ -558,14 +558,51 @@ def should_skip_session_copy_item(path: Path, is_dir: bool) -> bool:
 
 def find_chrome_executable() -> str | None:
     candidates = [
+        os.environ.get("CHROME"),
+        os.environ.get("CHROME_PATH"),
+        os.environ.get("EDGE"),
+        os.environ.get("MSEDGE"),
         Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
         Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
         Path.home() / r"AppData\Local\Google\Chrome\Application\chrome.exe",
+        Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
+        Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+        Path.home() / r"AppData\Local\Microsoft\Edge\Application\msedge.exe",
     ]
+    candidates.extend(browser_paths_from_registry())
     for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
+        if not candidate:
+            continue
+        path = Path(candidate)
+        if path.exists():
+            return str(path)
     return None
+
+
+def browser_paths_from_registry() -> list[Path]:
+    if os.name != "nt":
+        return []
+    try:
+        import winreg
+    except ImportError:
+        return []
+
+    paths: list[Path] = []
+    app_path_keys = [
+        (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"),
+        (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe"),
+    ]
+    for hive, key_path in app_path_keys:
+        try:
+            with winreg.OpenKey(hive, key_path) as key:
+                value, _value_type = winreg.QueryValueEx(key, "")
+        except OSError:
+            continue
+        if value:
+            paths.append(Path(str(value)))
+    return paths
 
 
 def _profile_grid_visible(page) -> bool:  # type: ignore[no-untyped-def]
