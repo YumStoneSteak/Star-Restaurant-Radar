@@ -52,6 +52,11 @@ if ($LASTEXITCODE -ne 0) {
   throw "Dependency install failed. exit=$LASTEXITCODE"
 }
 
+& $Python generate_icon_assets.py
+if ($LASTEXITCODE -ne 0) {
+  throw "Icon asset generation failed. exit=$LASTEXITCODE"
+}
+
 $CertifiArgs = @()
 $CertifiInfo = & $Python -c @'
 import importlib
@@ -77,11 +82,15 @@ $PyInstallerArgs = @(
   "--noconfirm",
   "--windowed",
   "--name", $AppName,
-  "--icon", "assets\app_icon.ico",
+  "--icon", "assets\app_star_icon.ico",
   "--add-data", "assets;assets"
 ) + $CertifiArgs + @("app.py")
 
-& $Python -m PyInstaller @PyInstallerArgs
+if ($OneFile) {
+  & $Python -m PyInstaller @PyInstallerArgs
+} else {
+  & $Python -m PyInstaller --noconfirm StarRestaurantRadar.spec
+}
 if ($LASTEXITCODE -ne 0) {
   throw "PyInstaller build failed. exit=$LASTEXITCODE"
 }

@@ -6,6 +6,24 @@ from pathlib import Path
 
 from config import APP_NAME, BASE_DIR, LEGACY_APP_NAMES, AppConfig
 
+COMMAND_TIMEOUT_SECONDS = 10
+
+
+def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            cwd=BASE_DIR,
+            timeout=COMMAND_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        detail = f"명령이 {COMMAND_TIMEOUT_SECONDS}초 안에 끝나지 않아 중단했습니다."
+        return subprocess.CompletedProcess(command, 124, stdout, f"{stderr}\n{detail}".strip())
+
 
 def task_days(config: AppConfig) -> str:
     mapping = {
@@ -22,14 +40,11 @@ def task_days(config: AppConfig) -> str:
 
 def task_target() -> tuple[str, str]:
     if getattr(sys, "frozen", False):
-        return sys.executable, "--scheduled-check"
-    onefile = BASE_DIR / "dist" / f"{APP_NAME}.exe"
-    if onefile.exists():
-        return str(onefile), "--scheduled-check"
-    packaged = BASE_DIR / "dist" / APP_NAME / f"{APP_NAME}.exe"
-    if packaged.exists():
-        return str(packaged), "--scheduled-check"
-    return sys.executable, f'"{BASE_DIR / "app.py"}" --scheduled-check'
+        return sys.executable, "--run-once"
+
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    executable = pythonw if pythonw.exists() else Path(sys.executable)
+    return str(executable), f'"{BASE_DIR / "app.py"}" --run-once'
 
 
 def register_task(config: AppConfig) -> subprocess.CompletedProcess[str]:
@@ -50,11 +65,26 @@ def register_task(config: AppConfig) -> subprocess.CompletedProcess[str]:
         "/TR",
         f'"{executable}" {arguments}'.strip(),
     ]
-    return subprocess.run(command, capture_output=True, text=True, cwd=BASE_DIR)
+    result = run_command(command)
+    if result.returncode != 0:
+        return result
+
+    settings_command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        (
+            f"$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries; "
+            f"Set-ScheduledTask -TaskName '{APP_NAME}' -Settings $settings | Out-Null"
+        ),
+    ]
+    settings_result = run_command(settings_command)
+    return settings_result if settings_result.returncode != 0 else result
 
 
 def unregister_task() -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(["schtasks", "/Delete", "/F", "/TN", APP_NAME], capture_output=True, text=True, cwd=BASE_DIR)
+    result = run_command(["schtasks", "/Delete", "/F", "/TN", APP_NAME])
     cleanup_legacy_tasks()
     return result
 
@@ -62,7 +92,7 @@ def unregister_task() -> subprocess.CompletedProcess[str]:
 def cleanup_legacy_tasks() -> None:
     for legacy_name in LEGACY_APP_NAMES:
         if legacy_name != APP_NAME:
-            subprocess.run(["schtasks", "/Delete", "/F", "/TN", legacy_name], capture_output=True, text=True, cwd=BASE_DIR)
+            run_command(["schtasks", "/Delete", "/F", "/TN", legacy_name])
 
 
 def script_path(name: str) -> Path:

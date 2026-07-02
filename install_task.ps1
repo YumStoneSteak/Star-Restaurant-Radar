@@ -4,7 +4,7 @@ param(
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ConfigPath = Join-Path $Root "config.json"
-$NotifyTime = "10:00"
+$NotifyTime = "09:30"
 
 if (Test-Path $ConfigPath) {
   try {
@@ -13,7 +13,7 @@ if (Test-Path $ConfigPath) {
       $NotifyTime = [string]$Config.notification_time
     }
   } catch {
-    Write-Host "Could not read config.json. Using default time 10:00."
+    Write-Host "Could not read config.json. Using default time 09:30."
   }
 }
 
@@ -25,13 +25,13 @@ $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 $AppPy = Join-Path $Root "app.py"
 
 if (Test-Path $OneFileExe) {
-  $Action = New-ScheduledTaskAction -Execute $OneFileExe -Argument "--scheduled-check" -WorkingDirectory (Split-Path -Parent $OneFileExe)
+  $Action = New-ScheduledTaskAction -Execute $OneFileExe -Argument "--run-once" -WorkingDirectory (Split-Path -Parent $OneFileExe)
 } elseif (Test-Path $PackagedExe) {
-  $Action = New-ScheduledTaskAction -Execute $PackagedExe -Argument "--scheduled-check" -WorkingDirectory $Root
+  $Action = New-ScheduledTaskAction -Execute $PackagedExe -Argument "--run-once" -WorkingDirectory $Root
 } elseif (Test-Path $WorkspaceVenvPython) {
-  $Action = New-ScheduledTaskAction -Execute $WorkspaceVenvPython -Argument "`"$AppPy`" --scheduled-check" -WorkingDirectory $Root
+  $Action = New-ScheduledTaskAction -Execute $WorkspaceVenvPython -Argument "`"$AppPy`" --run-once" -WorkingDirectory $Root
 } elseif (Test-Path $VenvPython) {
-  $Action = New-ScheduledTaskAction -Execute $VenvPython -Argument "`"$AppPy`" --scheduled-check" -WorkingDirectory $Root
+  $Action = New-ScheduledTaskAction -Execute $VenvPython -Argument "`"$AppPy`" --run-once" -WorkingDirectory $Root
 } else {
   $Python = (Get-Command python -ErrorAction SilentlyContinue).Source
   if (-not $Python) {
@@ -40,7 +40,7 @@ if (Test-Path $OneFileExe) {
   if (-not $Python) {
     throw "python or py command was not found. Install Python 3.12 or later."
   }
-  $Action = New-ScheduledTaskAction -Execute $Python -Argument "`"$AppPy`" --scheduled-check" -WorkingDirectory $Root
+  $Action = New-ScheduledTaskAction -Execute $Python -Argument "`"$AppPy`" --run-once" -WorkingDirectory $Root
 }
 
 $At = [datetime]::ParseExact($NotifyTime, "HH:mm", $null)

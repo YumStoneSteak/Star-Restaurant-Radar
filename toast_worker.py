@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from config import APP_TOAST_APP_ID
+from config import APP_TOAST_APP_ID, resolve_app_path
 
 
 def main() -> int:
@@ -22,6 +22,9 @@ def show_toast(title: str, body: str, permalink: str = "", image: str = "") -> N
     from win11toast import toast
 
     kwargs: dict[str, object] = {"duration": "short", "app_id": APP_TOAST_APP_ID}
+    icon_path = resolve_app_path("assets/app_star_icon_toast.png")
+    if icon_path.exists():
+        kwargs["icon"] = {"placement": "appLogoOverride", "src": str(icon_path)}
     if permalink:
         kwargs["on_click"] = permalink
         kwargs["button"] = {

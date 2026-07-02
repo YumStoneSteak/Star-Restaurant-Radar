@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "1.1.0",
+  [string]$Version = "1.2.0",
   [string]$MakensisPath = ""
 )
 
@@ -47,7 +47,7 @@ if (Test-Path $InstallerPath) {
   Remove-Item -LiteralPath $InstallerPath -Force
 }
 
-& $Makensis "/INPUTCHARSET" "UTF8" (Join-Path $Root "installer\StarRestaurantRadar.nsi")
+& $Makensis "/DAPP_VERSION=$Version" "/INPUTCHARSET" "UTF8" (Join-Path $Root "installer\StarRestaurantRadar.nsi")
 if ($LASTEXITCODE -ne 0) {
   throw "NSIS 설치 파일 빌드에 실패했습니다. exit=$LASTEXITCODE"
 }

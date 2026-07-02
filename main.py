@@ -1,28 +1,43 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 from config import AppConfig, load_config, setup_logging
 from holiday_service import HolidayService
 from image_cache import ImageCacheService
-from instagram_client import KST, InstagramPost, create_client, is_plausible_shortcode
+from instagram_client import KST, InstagramPost, create_client, is_plausible_shortcode, parse_datetime
 from state_store import StateStore, iso_now
 from toast_service import ToastService
 
 LOGGER = logging.getLogger(__name__)
+NOTIFICATION_WINDOW_DURATION = timedelta(hours=1)
 
 
-def run_once(force_mock: bool = False, force_notify: bool = False) -> int:
+def run_once(
+    force_mock: bool = False,
+    force_notify: bool = False,
+    now: datetime | None = None,
+) -> int:
     config = load_config()
     setup_logging(config, quiet=True)
     state_store = StateStore()
-    state_store.update(last_checked_at=iso_now(), last_error=None)
+    current_time = as_kst(now)
+    state_store.update(last_checked_at=current_time.isoformat(timespec="seconds"), last_error=None)
     LOGGER.info("StarRestaurantRadar started.")
 
     try:
-        today = datetime.now(KST).date()
+        if not force_notify and not is_within_notification_window(config, current_time):
+            window_start, window_end = notification_window_bounds(config, current_time.date())
+            message = (
+                f"알림 가능 시간 아님: 오늘 {window_start:%H:%M}~{window_end:%H:%M}에만 자동 알림을 확인합니다."
+            )
+            LOGGER.info("Skip notification: %s", message)
+            state_store.update(last_result=message)
+            return 0
+
+        today = current_time.date()
         holiday_service = HolidayService(config)
         should_run, reason = holiday_service.should_run(today)
         if not force_notify and not should_run:
@@ -38,6 +53,12 @@ def run_once(force_mock: bool = False, force_notify: bool = False) -> int:
             cached_post = create_cached_post_from_state(config, state)
             if cached_post:
                 cached, cached_image_path = cached_post
+                if not force_notify and not is_today_post(cached, current_time):
+                    state_store.update(
+                        last_result="오늘 게시물임을 확인할 수 없는 이전 캐시이므로 자동 알림을 보내지 않음",
+                        last_error=message,
+                    )
+                    return 0
                 if (
                     not force_notify
                     and config.prevent_duplicate
@@ -54,6 +75,9 @@ def run_once(force_mock: bool = False, force_notify: bool = False) -> int:
                 state_store.update(
                     last_notified_post_id=cached.post_id,
                     last_notified_at=iso_now(),
+                    last_post_published_at=(
+                        cached.published_at.isoformat(timespec="seconds") if cached.published_at else None
+                    ),
                     last_permalink=cached.permalink,
                     last_image_path=str(cached_image_path),
                     last_result=f"{result} (기존 캐시 이미지)",
@@ -82,8 +106,8 @@ def run_once(force_mock: bool = False, force_notify: bool = False) -> int:
             state_store.update(last_result=message)
             return 0
 
-        if not force_notify and config.only_today_posts and not is_today_post(post):
-            message = "오늘 날짜 게시물이 아니어서 알림 없음"
+        if not force_notify and not is_today_post(post, current_time):
+            message = "오늘 게시물이 아니므로 자동 알림을 보내지 않음"
             LOGGER.info("%s: %s", message, post.permalink)
             state_store.update(last_result=message, last_permalink=post.permalink)
             return 0
@@ -113,6 +137,7 @@ def run_once(force_mock: bool = False, force_notify: bool = False) -> int:
         state_store.update(
             last_notified_post_id=post.post_id,
             last_notified_at=iso_now(),
+            last_post_published_at=(post.published_at.isoformat(timespec="seconds") if post.published_at else None),
             last_permalink=post.permalink,
             last_image_path=str(image_path) if image_path else None,
             last_result=result,
@@ -125,10 +150,31 @@ def run_once(force_mock: bool = False, force_notify: bool = False) -> int:
         return 1
 
 
-def is_today_post(post: InstagramPost) -> bool:
+def as_kst(value: datetime | None = None) -> datetime:
+    current = value or datetime.now(KST)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=KST)
+    return current.astimezone(KST)
+
+
+def notification_window_bounds(config: AppConfig, target_date: date) -> tuple[datetime, datetime]:
+    hour, minute = (int(part) for part in config.notification_time.split(":"))
+    window_start = datetime.combine(target_date, time(hour=hour, minute=minute), tzinfo=KST)
+    end_of_day = datetime.combine(target_date, time.max, tzinfo=KST)
+    window_end = min(window_start + NOTIFICATION_WINDOW_DURATION, end_of_day)
+    return window_start, window_end
+
+
+def is_within_notification_window(config: AppConfig, now: datetime | None = None) -> bool:
+    current = as_kst(now)
+    window_start, window_end = notification_window_bounds(config, current.date())
+    return window_start <= current <= window_end
+
+
+def is_today_post(post: InstagramPost, now: datetime | None = None) -> bool:
     if post.published_at is None:
         return False
-    return post.published_at.astimezone(KST).date() == datetime.now(KST).date()
+    return post.published_at.astimezone(KST).date() == as_kst(now).date()
 
 
 def create_lookup_failure_post(username: str) -> InstagramPost:
@@ -168,8 +214,10 @@ def create_cached_post_from_state(
     if shortcode not in permalink:
         permalink = f"https://www.instagram.com/p/{post_id}/"
 
-    today = datetime.now(KST).date()
-    published_at = datetime.combine(today, time(hour=9), tzinfo=KST)
+    published_at = None
+    state_published_at = state.get("last_post_published_at")
+    if isinstance(state_published_at, str):
+        published_at = parse_datetime(state_published_at)
     return (
         InstagramPost(
             post_id=post_id,

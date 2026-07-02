@@ -10,7 +10,9 @@ RequestExecutionLevel user
 !define APP_EXE "StarRestaurantRadar.exe"
 !define APP_DISPLAY_NAME "StarRestaurantRadar"
 !define APP_PRODUCT_NAME "StarRestaurantRadar"
-!define APP_VERSION "1.1.0"
+!ifndef APP_VERSION
+!define APP_VERSION "1.2.0"
+!endif
 !define APP_PUBLISHER "YumStoneSteak"
 !define APP_REPO_URL "https://github.com/YumStoneSteak/Star-Restaurant-Radar"
 !define BUILD_DIR "..\dist\StarRestaurantRadar"
@@ -21,8 +23,12 @@ InstallDir "$LOCALAPPDATA\Programs\${APP_PRODUCT_NAME}"
 InstallDirRegKey HKCU "Software\${APP_ID}" "InstallDir"
 
 !define MUI_ABORTWARNING
-!define MUI_ICON "..\assets\app_icon.ico"
-!define MUI_UNICON "..\assets\app_icon.ico"
+!define MUI_ICON "..\assets\app_star_icon.ico"
+!define MUI_UNICON "..\assets\app_star_icon.ico"
+!define MUI_HEADERIMAGE
+!define MUI_HEADERIMAGE_RIGHT
+!define MUI_HEADERIMAGE_BITMAP "..\assets\app_star_installer_header.bmp"
+!define MUI_HEADERIMAGE_UNBITMAP "..\assets\app_star_installer_header.bmp"
 
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
@@ -64,7 +70,7 @@ firstInstallDetected:
   File /r "${BUILD_DIR}\*.*"
 
   CreateDirectory "$SMPROGRAMS\${APP_PRODUCT_NAME}"
-  CreateShortCut "$SMPROGRAMS\${APP_PRODUCT_NAME}\${APP_DISPLAY_NAME}.lnk" "$INSTDIR\${APP_EXE}"
+  CreateShortCut "$SMPROGRAMS\${APP_PRODUCT_NAME}\${APP_DISPLAY_NAME}.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\${APP_EXE}" 0
 
   WriteRegStr HKCU "Software\${APP_ID}" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}" "DisplayName" "${APP_DISPLAY_NAME}"

@@ -13,8 +13,9 @@ APP_NAME = "StarRestaurantRadar"
 APP_TITLE = "StarRestaurantRadar"
 APP_TOAST_APP_ID = "StarRestaurantRadar"
 APP_PRODUCT_NAME = "StarRestaurantRadar"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 GITHUB_REPO = "YumStoneSteak/Star-Restaurant-Radar"
+DEFAULT_NOTIFICATION_TIME = "09:30"
 LEGACY_APP_NAMES = ("ByeolsikdangNotifier",)
 if getattr(sys, "frozen", False):
     exe_dir = Path(sys.executable).resolve().parent
@@ -33,10 +34,10 @@ STATE_PATH = BASE_DIR / "state.json"
 @dataclass
 class AppConfig:
     instagram_username: str = "byeolsikdang"
-    notification_time: str = "10:00"
+    notification_time: str = DEFAULT_NOTIFICATION_TIME
     enabled_weekdays: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5])
     exclude_korean_holidays: bool = True
-    only_today_posts: bool = False
+    only_today_posts: bool = True
     prevent_duplicate: bool = True
     fallback_link_only_notification: bool = True
     notification_mode: str = "windows_toast"
@@ -59,6 +60,7 @@ class AppConfig:
         cleaned["instagram_username"] = str(cleaned["instagram_username"]).strip().lstrip("@") or "byeolsikdang"
         cleaned["notification_time"] = normalize_time(str(cleaned["notification_time"]))
         cleaned["enabled_weekdays"] = normalize_weekdays(cleaned["enabled_weekdays"])
+        cleaned["only_today_posts"] = True
         cleaned["notification_mode"] = "windows_toast"
         cleaned["client_mode"] = str(cleaned["client_mode"] or "auto").lower()
         if cleaned["client_mode"] not in {"auto", "web", "mock"}:
@@ -96,9 +98,9 @@ def normalize_time(value: str) -> str:
         hour = int(parts[0])
         minute = int(parts[1]) if len(parts) > 1 else 0
     except (TypeError, ValueError, IndexError):
-        return "10:00"
+        return DEFAULT_NOTIFICATION_TIME
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        return "10:00"
+        return DEFAULT_NOTIFICATION_TIME
     return f"{hour:02d}:{minute:02d}"
 
 

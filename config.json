@@ -1,6 +1,6 @@
 {
   "instagram_username": "byeolsikdang",
-  "notification_time": "10:00",
+  "notification_time": "09:30",
   "enabled_weekdays": [
     1,
     2,
@@ -9,7 +9,7 @@
     5
   ],
   "exclude_korean_holidays": true,
-  "only_today_posts": false,
+  "only_today_posts": true,
   "prevent_duplicate": true,
   "fallback_link_only_notification": true,
   "notification_mode": "windows_toast",
@@ -23,5 +23,5 @@
   "test_post_url": "",
   "test_image_url": "",
   "holiday_failure_mode": "continue",
-  "start_on_boot": false
+  "start_on_boot": true
 }

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
+import time
 import winreg
 import webbrowser
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from config import APP_NAME, APP_TITLE, APP_VERSION, BASE_DIR, LEGACY_APP_NAMES, AppConfig, load_config, save_config, setup_logging
@@ -12,6 +15,30 @@ from image_cache import ImageCacheService
 from instagram_client import create_client, create_login_session as open_instagram_login_session
 from main import run_once
 from scheduler import register_task, unregister_task
+
+
+def format_last_checked_at(value: object, now: datetime | None = None) -> str:
+    if not value:
+        return "-"
+
+    text = str(value)
+    try:
+        checked_at = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return text
+
+    current = now or datetime.now().astimezone()
+    if checked_at.tzinfo is not None and current.tzinfo is not None:
+        checked_at = checked_at.astimezone(current.tzinfo)
+
+    period = "오전" if checked_at.hour < 12 else "오후"
+    display_hour = checked_at.hour % 12 or 12
+    display_time = f"{period} {display_hour}:{checked_at.minute:02d}"
+    if checked_at.date() == current.date():
+        return f"오늘 {display_time}"
+    if checked_at.date() == (current - timedelta(days=1)).date():
+        return f"어제 {display_time}"
+    return f"{checked_at.year}년 {checked_at.month}월 {checked_at.day}일 {display_time}"
 from state_store import StateStore
 from toast_service import open_url
 from update_service import UpdateError, check_for_update, download_update_installer, install_update
@@ -31,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--first-run", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--tray-smoke-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--ui-layout-smoke-test", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--detail-layout-smoke-test", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--settings-responsiveness-smoke-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--toast-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--toast-title", default="", help=argparse.SUPPRESS)
     parser.add_argument("--toast-body", default="", help=argparse.SUPPRESS)
@@ -45,6 +74,10 @@ def main(argv: list[str] | None = None) -> int:
         from detail_window import run_detail
 
         return run_detail(args.detail)
+    if args.detail_layout_smoke_test:
+        from detail_window import run_detail
+
+        return run_detail("smoke-test", smoke_test=True)
     if args.toast_worker:
         from toast_worker import show_toast
 
@@ -69,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_settings_app(start_minimized=True, smoke_test=True)
     if args.ui_layout_smoke_test:
         return run_settings_app(start_minimized=True, ui_layout_test=True)
+    if args.settings_responsiveness_smoke_test:
+        return run_settings_app(settings_responsiveness_test=True)
     if not acquire_tray_instance():
         return 0
     return run_settings_app(start_minimized=args.minimized, first_run=args.first_run)
@@ -159,11 +194,13 @@ def run_settings_app(
     smoke_test: bool = False,
     ui_layout_test: bool = False,
     scheduled_check: bool = False,
+    settings_responsiveness_test: bool = False,
 ) -> int:
     try:
-        from PySide6.QtCore import QTimer, QTime, Qt
-        from PySide6.QtGui import QAction, QIcon
+        from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, QTime, Qt, Signal
+        from PySide6.QtGui import QAction
         from PySide6.QtWidgets import (
+            QAbstractSpinBox,
             QApplication,
             QCheckBox,
             QComboBox,
@@ -178,7 +215,6 @@ def run_settings_app(
             QScrollArea,
             QSizePolicy,
             QSystemTrayIcon,
-            QTextEdit,
             QTimeEdit,
             QVBoxLayout,
             QWidget,
@@ -187,10 +223,27 @@ def run_settings_app(
         print("PySide6가 설치되어 있지 않습니다. requirements.txt를 설치한 뒤 다시 실행해 주세요.")
         return 1
 
-    from glass_window import APP_QSS, apply_glass_effect
+    from ui_theme import apply_light_theme, brand_pixmap, load_app_icon
+
+    class SchedulerWorkerSignals(QObject):
+        finished = Signal(object)
+
+    class SchedulerWorker(QRunnable):
+        def __init__(self, config: AppConfig, registrar=register_task) -> None:  # type: ignore[no-untyped-def]
+            super().__init__()
+            self.config = config
+            self.registrar = registrar
+            self.signals = SchedulerWorkerSignals()
+
+        def run(self) -> None:
+            try:
+                result = self.registrar(self.config)
+            except Exception as exc:
+                result = exc
+            self.signals.finished.emit(result)
 
     class SettingsWindow(QWidget):
-        def __init__(self, auto_apply: bool = True) -> None:
+        def __init__(self, auto_apply: bool = True, scheduler_registrar=register_task) -> None:  # type: ignore[no-untyped-def]
             super().__init__()
             self.auto_apply = auto_apply
             self.pending_apply_message: str | None = None
@@ -200,13 +253,20 @@ def run_settings_app(
             setup_logging(self.config)
             self.state_store = StateStore()
             self.really_quit = False
+            self.quit_requested = False
+            self.settings_dirty = False
+            self.scheduler_busy = False
+            self.pending_scheduler_request: tuple[AppConfig, str, bool] | None = None
+            self.active_scheduler_worker: SchedulerWorker | None = None
+            self.scheduler_pool = QThreadPool(self)
+            self.scheduler_pool.setMaxThreadCount(1)
+            self.scheduler_registrar = scheduler_registrar
             self.setWindowTitle(APP_TITLE)
-            self.setObjectName("GlassRoot")
-            self.setMinimumSize(720, 620)
-            self.resize(760, 700)
-            self.setStyleSheet(APP_QSS)
-            apply_glass_effect(self)
-            self.app_icon = QIcon(str(Path(__file__).resolve().parent / "assets" / "app_icon.ico"))
+            self.setObjectName("AppRoot")
+            self.setMinimumSize(520, 500)
+            self.resize(580, 570)
+            apply_light_theme(self)
+            self.app_icon = load_app_icon()
             self.setWindowIcon(self.app_icon)
 
             outer = QVBoxLayout(self)
@@ -220,23 +280,49 @@ def run_settings_app(
             self.content_widget = QWidget()
             self.content_widget.setObjectName("ScrollContent")
             root = QVBoxLayout(self.content_widget)
-            root.setContentsMargins(28, 28, 28, 28)
-            root.setSpacing(24)
+            root.setContentsMargins(22, 18, 22, 18)
+            root.setSpacing(10)
             self.scroll_area.setWidget(self.content_widget)
             outer.addWidget(self.scroll_area)
 
+            header = QFrame()
+            header.setObjectName("HeaderFrame")
+            header_layout = QHBoxLayout(header)
+            header_layout.setContentsMargins(2, 0, 2, 0)
+            header_layout.setSpacing(12)
+            brand_icon = QLabel()
+            brand_icon.setObjectName("BrandIcon")
+            brand_icon.setFixedSize(58, 58)
+            brand_icon.setPixmap(brand_pixmap(56))
+            brand_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            header_layout.addWidget(brand_icon)
+
+            header_copy = QVBoxLayout()
+            header_copy.setSpacing(2)
             title = QLabel("별식당 메뉴 알림")
             title.setObjectName("Title")
-            subtitle = QLabel("설정한 시간에 @byeolsikdang 최신 게시물 이미지를 알림으로 보여줍니다.")
+            subtitle = QLabel("오늘 메뉴가 올라오는 작은 설렘을 놓치지 않게 알려드려요.")
             subtitle.setObjectName("Subtitle")
-            root.addWidget(title)
-            root.addWidget(subtitle)
+            subtitle.setWordWrap(True)
+            header_copy.addWidget(title)
+            header_copy.addWidget(subtitle)
+            header_layout.addLayout(header_copy, 1)
 
-            settings_card = self._card(minimum_height=230)
+            version_badge = QLabel(f"v{APP_VERSION}")
+            version_badge.setObjectName("VersionBadge")
+            version_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            header_layout.addWidget(version_badge, 0, Qt.AlignmentFlag.AlignTop)
+            root.addWidget(header)
+
+            settings_card = self._card(minimum_height=112)
             self.settings_card = settings_card
             self.settings_layout = QGridLayout(settings_card)
             settings_layout = self.settings_layout
             self._configure_pair_grid(settings_layout)
+
+            settings_title = QLabel("알림 설정")
+            settings_title.setObjectName("SectionTitle")
+            settings_layout.addWidget(settings_title, 0, 0, 1, 4)
 
             self.target_label = QLabel("@byeolsikdang")
             self.target_label.setObjectName("TargetAccount")
@@ -245,46 +331,73 @@ def run_settings_app(
             hour, minute = [int(part) for part in self.config.notification_time.split(":")]
             self.time_input.setTime(QTime(hour, minute))
             self.time_input.setDisplayFormat("HH:mm")
-            self.start_on_boot = QCheckBox("컴퓨터 부팅 시 자동 실행")
+            self.time_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+            self.start_on_boot = QCheckBox("컴퓨터를 켤 때 자동 실행")
+            self.start_on_boot.setObjectName("AutoStartCheck")
             self.start_on_boot.setChecked(self.config.start_on_boot)
             self.apply_timer = QTimer(self)
             self.apply_timer.setSingleShot(True)
             self.apply_timer.timeout.connect(self.apply_settings)
 
-            self._add_field_pair(settings_layout, 0, 0, "대상 계정", self.target_label)
-            self._add_field_pair(settings_layout, 1, 0, "알림 시간", self.time_input)
-            settings_layout.addWidget(QLabel("자동 실행"), 2, 0)
+            self._add_field_pair(settings_layout, 1, 0, "대상 계정", self.target_label)
+            self._add_field_pair(settings_layout, 1, 2, "알림 시간", self.time_input)
+            auto_label = QLabel("자동 실행")
+            auto_label.setObjectName("FieldLabel")
+            settings_layout.addWidget(auto_label, 2, 0)
             settings_layout.addWidget(self.start_on_boot, 2, 1, 1, 3)
-            settings_layout.setRowMinimumHeight(0, 76)
-            settings_layout.setRowMinimumHeight(1, 76)
-            settings_layout.setRowMinimumHeight(2, 64)
             root.addWidget(settings_card)
 
-            button_card = self._card(minimum_height=320)
+            button_card = self._card(minimum_height=140)
             self.button_card = button_card
             self.button_layout = QVBoxLayout(button_card)
             button_layout = self.button_layout
-            button_layout.setContentsMargins(26, 26, 26, 26)
-            button_layout.setSpacing(16)
-            buttons = [
-                ("최신 게시물 지금 확인", self.check_latest_now),
-                ("Instagram 로그인 세션 만들기", self.create_login_session),
-                ("업데이트 확인", self.check_updates),
-                ("종료", self.quit_from_tray),
-            ]
-            self.action_buttons: list[QPushButton] = []
-            for label, handler in buttons:
-                button = QPushButton(label)
-                button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-                button.clicked.connect(handler)
-                button_layout.addWidget(button)
-                self.action_buttons.append(button)
+            button_layout.setContentsMargins(16, 12, 16, 12)
+            button_layout.setSpacing(6)
+
+            actions_title = QLabel("바로 실행")
+            actions_title.setObjectName("SectionTitle")
+            button_layout.addWidget(actions_title)
+
+            self.action_grid = QGridLayout()
+            self.action_grid.setHorizontalSpacing(8)
+            self.action_grid.setVerticalSpacing(8)
+
+            check_button = QPushButton("최신 메뉴 확인")
+            check_button.setObjectName("PrimaryButton")
+            check_button.clicked.connect(self.check_latest_now)
+            login_button = QPushButton("Instagram 로그인")
+            login_button.clicked.connect(self.create_login_session)
+            update_button = QPushButton("업데이트 확인")
+            update_button.clicked.connect(self.check_updates)
+            quit_button = QPushButton("종료")
+            quit_button.setObjectName("QuietButton")
+            quit_button.clicked.connect(self.quit_from_tray)
+
+            self.action_grid.addWidget(check_button, 0, 0)
+            self.action_grid.addWidget(login_button, 0, 1)
+            self.action_grid.addWidget(update_button, 1, 0)
+            self.action_grid.addWidget(quit_button, 1, 1)
+            button_layout.addLayout(self.action_grid)
+            self.action_buttons = [check_button, login_button, update_button, quit_button]
             root.addWidget(button_card)
 
-            self.status = QTextEdit()
-            self.status.setReadOnly(True)
-            self.status.setMinimumHeight(180)
-            root.addWidget(self.status)
+            status_card = QFrame()
+            status_card.setObjectName("StatusCard")
+            status_card.setMinimumHeight(120)
+            status_layout = QVBoxLayout(status_card)
+            status_layout.setContentsMargins(15, 11, 15, 11)
+            status_layout.setSpacing(3)
+            status_title = QLabel("최근 상태")
+            status_title.setObjectName("SectionTitle")
+            status_layout.addWidget(status_title)
+            self.status = QLabel()
+            self.status.setObjectName("StatusBody")
+            self.status.setMinimumHeight(72)
+            self.status.setWordWrap(True)
+            self.status.setTextFormat(Qt.TextFormat.PlainText)
+            self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            status_layout.addWidget(self.status)
+            root.addWidget(status_card)
             self.create_tray_icon()
             self.time_input.timeChanged.connect(lambda _time: self.queue_settings_apply("알림 시간이 적용되었습니다."))
             self.start_on_boot.toggled.connect(lambda _checked: self.queue_settings_apply("자동 실행 설정이 적용되었습니다."))
@@ -294,17 +407,17 @@ def run_settings_app(
 
         def _card(self, minimum_height: int | None = None) -> QFrame:
             frame = QFrame()
-            frame.setObjectName("GlassCard")
+            frame.setObjectName("SurfaceCard")
             if minimum_height is not None:
                 frame.setMinimumHeight(minimum_height)
             return frame
 
         def _configure_pair_grid(self, layout: QGridLayout) -> None:
-            layout.setContentsMargins(26, 26, 26, 26)
-            layout.setHorizontalSpacing(22)
-            layout.setVerticalSpacing(22)
-            layout.setColumnMinimumWidth(0, 150)
-            layout.setColumnMinimumWidth(2, 150)
+            layout.setContentsMargins(16, 13, 16, 13)
+            layout.setHorizontalSpacing(8)
+            layout.setVerticalSpacing(6)
+            layout.setColumnMinimumWidth(0, 68)
+            layout.setColumnMinimumWidth(2, 64)
             layout.setColumnStretch(1, 1)
             layout.setColumnStretch(3, 1)
 
@@ -314,6 +427,7 @@ def run_settings_app(
 
         def _add_field_pair(self, layout: QGridLayout, row: int, column: int, label: str, widget) -> None:
             field_label = QLabel(label)
+            field_label.setObjectName("FieldLabel")
             field_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
             field_label.setWordWrap(True)
             layout.addWidget(field_label, row, column)
@@ -325,7 +439,7 @@ def run_settings_app(
                 notification_time=self.time_input.time().toString("HH:mm"),
                 enabled_weekdays=[1, 2, 3, 4, 5],
                 exclude_korean_holidays=True,
-                only_today_posts=False,
+                only_today_posts=True,
                 prevent_duplicate=True,
                 fallback_link_only_notification=True,
                 notification_mode="windows_toast",
@@ -349,24 +463,76 @@ def run_settings_app(
 
         def queue_settings_apply(self, message: str | None = None) -> None:
             self.pending_apply_message = message
+            self.settings_dirty = True
             if not self.auto_apply:
                 return
             self.apply_timer.start(350)
 
         def apply_settings(self, show_message: bool = True) -> None:
+            self.apply_timer.stop()
             self._save_settings()
-            result = register_task(self.config)
-            if result.returncode == 0:
-                message = self.pending_apply_message or "설정이 자동 적용되었습니다."
+            self.settings_dirty = False
+            message = self.pending_apply_message or "설정이 자동 적용되었습니다."
+            self.pending_apply_message = None
+            self._queue_scheduler_registration(self.config, message, show_message)
+
+        def _queue_scheduler_registration(self, config: AppConfig, message: str, show_message: bool) -> None:
+            request = (config, message, show_message)
+            if self.scheduler_busy:
+                self.pending_scheduler_request = request
+                return
+            self._start_scheduler_registration(request)
+
+        def _start_scheduler_registration(self, request: tuple[AppConfig, str, bool]) -> None:
+            config, _message, _show_message = request
+            self.scheduler_busy = True
+            worker = SchedulerWorker(config, self.scheduler_registrar)
+            self.active_scheduler_worker = worker
+            worker.signals.finished.connect(
+                lambda result, completed_request=request: self._scheduler_registration_finished(
+                    result,
+                    completed_request,
+                )
+            )
+            self.scheduler_pool.start(worker)
+
+        def _scheduler_registration_finished(
+            self,
+            result: object,
+            request: tuple[AppConfig, str, bool],
+        ) -> None:
+            _config, success_message, show_message = request
+            self.scheduler_busy = False
+            self.active_scheduler_worker = None
+            if isinstance(result, Exception):
+                message = f"설정은 저장했지만 알림 시간 적용 중 오류가 발생했습니다: {result}"
+                show_message = True
+            elif result.returncode == 0:
+                message = success_message
             else:
                 message = f"설정은 저장했지만 알림 시간 적용에 실패했습니다: {result.stderr or result.stdout}"
                 show_message = True
-            self.pending_apply_message = None
+
             if show_message:
                 self.refresh_status(message)
                 self.notify_tray(message)
             else:
                 self.refresh_status()
+
+            pending_request = self.pending_scheduler_request
+            self.pending_scheduler_request = None
+            if pending_request is not None:
+                self._start_scheduler_registration(pending_request)
+                return
+
+            if self.quit_requested:
+                self._finish_quit()
+
+        def _finish_quit(self) -> None:
+            self.really_quit = True
+            self.quit_requested = False
+            self.tray_icon.hide()
+            QApplication.instance().quit()
 
         def send_test_notification(self) -> None:
             self._save_settings()
@@ -485,7 +651,7 @@ def run_settings_app(
             self.tray_menu = QMenu(self)
             self.tray_actions: list[QAction] = []
             self.add_tray_action("설정창 열기", self.show_settings_from_tray)
-            self.add_tray_action("최신 게시물 지금 확인", self.check_latest_now)
+            self.add_tray_action("최신 메뉴 확인", self.check_latest_now)
             self.add_tray_action("Instagram 로그인 세션 만들기", self.create_login_session)
             self.add_tray_action("업데이트 확인", self.check_updates)
             self.tray_menu.addSeparator()
@@ -507,12 +673,18 @@ def run_settings_app(
                 self.show_settings_from_tray()
 
         def quit_from_tray(self) -> None:
-            self.really_quit = True
-            self.tray_icon.hide()
-            QApplication.instance().quit()
+            self.quit_requested = True
+            if self.settings_dirty or self.apply_timer.isActive():
+                self.apply_settings(show_message=False)
+            if self.scheduler_busy or self.pending_scheduler_request is not None:
+                message = "설정 적용을 마무리한 뒤 종료합니다. 창은 계속 응답합니다."
+                self.refresh_status(message)
+                self.notify_tray(message)
+                return
+            self._finish_quit()
 
         def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-            if self.auto_apply:
+            if self.auto_apply and (self.settings_dirty or self.apply_timer.isActive()):
                 self.apply_settings(show_message=False)
             if self.really_quit or not QSystemTrayIcon.isSystemTrayAvailable():
                 event.accept()
@@ -534,17 +706,29 @@ def run_settings_app(
                 lines.append("")
             lines.extend(
                 [
-                    f"마지막 확인 시간: {state.get('last_checked_at') or '-'}",
-                    f"마지막 알림 게시물: {state.get('last_permalink') or '-'}",
-                    f"마지막 결과: {state.get('last_result') or '-'}",
-                    f"마지막 오류: {state.get('last_error') or '-'}",
+                    f"최근 확인  {format_last_checked_at(state.get('last_checked_at'))}",
+                    f"결과  {state.get('last_result') or '-'}",
+                    f"오류  {state.get('last_error') or '-'}",
                 ]
             )
-            self.status.setPlainText("\n".join(lines))
+            self.status.setText("\n".join(lines))
 
     app = QApplication.instance() or QApplication(sys.argv)
+    app.setApplicationDisplayName(APP_TITLE)
+    app.setWindowIcon(load_app_icon())
     app.setQuitOnLastWindowClosed(False)
-    window = SettingsWindow(auto_apply=not (smoke_test or ui_layout_test))
+    scheduler_registrar = register_task
+    if settings_responsiveness_test:
+        def slow_test_registrar(_config: AppConfig) -> subprocess.CompletedProcess[str]:
+            time.sleep(0.8)
+            return subprocess.CompletedProcess(["settings-responsiveness-smoke-test"], 0, "", "")
+
+        scheduler_registrar = slow_test_registrar
+
+    window = SettingsWindow(
+        auto_apply=not (smoke_test or ui_layout_test or settings_responsiveness_test),
+        scheduler_registrar=scheduler_registrar,
+    )
     if scheduled_check and not QSystemTrayIcon.isSystemTrayAvailable():
         window.really_quit = True
         window.close()
@@ -552,7 +736,7 @@ def run_settings_app(
     if smoke_test:
         expected_actions = [
             "설정창 열기",
-            "최신 게시물 지금 확인",
+            "최신 메뉴 확인",
             "Instagram 로그인 세션 만들기",
             "업데이트 확인",
             "종료",
@@ -579,24 +763,46 @@ def run_settings_app(
     if ui_layout_test:
         failures = []
         smoke_log = BASE_DIR / "ui_layout_smoke_test.log"
-        window.resize(window.minimumSize())
+        window.resize(580, 560)
         window.show()
         QApplication.processEvents()
 
-        if window.settings_layout.columnCount() < 4:
-            failures.append("settings grid is not two-column")
+        if window.settings_layout.columnCount() != 4:
+            failures.append("settings grid is not compact paired layout")
 
-        if window.settings_card.minimumHeight() < 220:
+        if window.settings_card.minimumHeight() < 105:
             failures.append("settings section minimum height is too small")
-        if window.button_card.minimumHeight() < 310:
-            failures.append("button section minimum height is too small")
-        if window.settings_layout.verticalSpacing() < 20:
+        if not 130 <= window.button_card.minimumHeight() <= 145:
+            failures.append("button section is not compact")
+        if window.settings_layout.verticalSpacing() < 6:
             failures.append("settings row spacing is too small")
-        if window.button_layout.spacing() < 14:
+        if window.button_layout.spacing() < 6:
             failures.append("button vertical gap is too small")
+        if window.action_grid.rowCount() != 2 or window.action_grid.columnCount() != 2:
+            failures.append("action buttons are not arranged in a 2x2 grid")
+        expected_grid = [
+            (window.action_buttons[0], 0, 0),
+            (window.action_buttons[1], 0, 1),
+            (window.action_buttons[2], 1, 0),
+            (window.action_buttons[3], 1, 1),
+        ]
+        for expected_button, row, column in expected_grid:
+            item = window.action_grid.itemAtPosition(row, column)
+            if item is None or item.widget() is not expected_button:
+                failures.append(f"action grid position is wrong: row={row} column={column}")
+        if window.time_input.buttonSymbols() != QAbstractSpinBox.ButtonSymbols.NoButtons:
+            failures.append("time input arrow buttons are still enabled")
+        if window.start_on_boot.objectName() != "AutoStartCheck":
+            failures.append("auto-start contrast style is missing")
+        if window.action_buttons[0].objectName() != "PrimaryButton":
+            failures.append("primary action style is missing")
+        if window.action_buttons[-1].objectName() != "QuietButton":
+            failures.append("quiet exit style is missing")
+        if window.scroll_area.verticalScrollBar().maximum() != 0:
+            failures.append("unexpected vertical scroll at 580x560")
 
         relevant_widgets = []
-        for widget_class in [QLabel, QLineEdit, QTimeEdit, QComboBox, QCheckBox, QPushButton, QTextEdit]:
+        for widget_class in [QLabel, QLineEdit, QTimeEdit, QComboBox, QCheckBox, QPushButton]:
             relevant_widgets.extend(window.content_widget.findChildren(widget_class))
 
         visible_widgets = [widget for widget in relevant_widgets if widget.isVisible()]
@@ -631,6 +837,30 @@ def run_settings_app(
             return 1
         smoke_log.write_text("UI layout smoke test passed", encoding="utf-8")
         print("UI layout smoke test passed")
+        return 0
+
+    if settings_responsiveness_test:
+        result: dict[str, float | bool] = {"tick_delay": 99.0, "timed_out": False}
+        started_at = time.perf_counter()
+
+        def record_ui_tick() -> None:
+            result["tick_delay"] = time.perf_counter() - started_at
+
+        def fail_on_timeout() -> None:
+            result["timed_out"] = True
+            window.really_quit = True
+            QApplication.instance().quit()
+
+        QTimer.singleShot(50, record_ui_tick)
+        QTimer.singleShot(3000, fail_on_timeout)
+        window.apply_settings(show_message=False)
+        window.quit_requested = True
+        app.exec()
+        tick_delay = float(result["tick_delay"])
+        if bool(result["timed_out"]) or tick_delay >= 0.3:
+            print(f"Settings responsiveness smoke test failed: tick_delay={tick_delay:.3f}")
+            return 1
+        print(f"Settings responsiveness smoke test passed: tick_delay={tick_delay:.3f}")
         return 0
 
     if scheduled_check:

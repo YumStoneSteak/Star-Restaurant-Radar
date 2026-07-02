@@ -12,6 +12,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_checked_at": None,
     "last_notified_post_id": None,
     "last_notified_at": None,
+    "last_post_published_at": None,
     "last_permalink": None,
     "last_image_path": None,
     "last_result": None,
@@ -52,4 +53,3 @@ class StateStore:
 
 def iso_now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
-
