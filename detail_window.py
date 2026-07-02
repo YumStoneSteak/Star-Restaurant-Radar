@@ -4,7 +4,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from config import APP_TITLE, load_config
+from config import load_config
 from state_store import StateStore
 
 
@@ -129,7 +129,7 @@ def run_detail(post_id: str | None = None, smoke_test: bool = False) -> int:
             webbrowser.open(self.permalink)
 
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setApplicationDisplayName(APP_TITLE)
+    app.setApplicationDisplayName("오늘의 별식당 메뉴")
     app.setWindowIcon(load_app_icon())
     window = DetailWindow()
     window.show()

@@ -84,7 +84,7 @@ class WebInstagramClient(InstagramClient):
     def get_latest_post(self, username: str) -> InstagramPost | None:
         username = username.strip().lstrip("@")
         if not username:
-            raise InstagramClientError("Instagram username is empty.")
+            raise InstagramClientError("인스타그램 사용자 이름이 비어 있습니다.")
 
         api_post = self._get_latest_from_profile_api(username)
         if api_post:
@@ -98,7 +98,7 @@ class WebInstagramClient(InstagramClient):
         profile_html = self._fetch_text(profile_url)
         shortcode = self._extract_latest_shortcode(profile_html)
         if not shortcode:
-            raise InstagramClientError("Could not find a latest post shortcode on the public profile page.")
+            raise InstagramClientError("공개 프로필에서 최신 게시물 정보를 찾지 못했습니다.")
 
         permalink = f"https://www.instagram.com/p/{shortcode}/"
         post_html = self._fetch_text(permalink)
@@ -316,7 +316,7 @@ class WebInstagramClient(InstagramClient):
                 raw = response.read()
                 return raw.decode("utf-8", errors="replace")
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
-            raise InstagramClientError(f"Failed to fetch {url}: {exc}") from exc
+            raise InstagramClientError(f"{url}을 불러오지 못했습니다: {exc}") from exc
 
     def _extract_latest_shortcode(self, document: str) -> str | None:
         patterns = [
@@ -513,7 +513,7 @@ def refresh_runtime_instagram_session(source_path: Path, runtime_path: Path) -> 
     source = source_path.resolve()
     runtime = runtime_path.resolve()
     if runtime == source or runtime.parent != source.parent or not runtime.name.endswith("_runtime"):
-        raise InstagramClientError("Unsafe Instagram runtime session path.")
+        raise InstagramClientError("인스타그램 임시 세션 경로가 안전하지 않습니다.")
 
     if runtime.exists():
         shutil.rmtree(runtime, ignore_errors=True)

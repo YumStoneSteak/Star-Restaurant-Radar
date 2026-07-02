@@ -9,8 +9,9 @@ import winreg
 import webbrowser
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
-from config import APP_NAME, APP_TITLE, APP_VERSION, BASE_DIR, LEGACY_APP_NAMES, AppConfig, load_config, save_config, setup_logging
+from config import APP_NAME, APP_VERSION, BASE_DIR, LEGACY_APP_NAMES, AppConfig, load_config, save_config, setup_logging
 from image_cache import ImageCacheService
 from instagram_client import create_client, create_login_session as open_instagram_login_session
 from main import run_once
@@ -41,7 +42,10 @@ def format_last_checked_at(value: object, now: datetime | None = None) -> str:
     return f"{checked_at.year}년 {checked_at.month}월 {checked_at.day}일 {display_time}"
 from state_store import StateStore
 from toast_service import open_url
-from update_service import UpdateError, check_for_update, download_update_installer, install_update
+from update_service import check_for_update, download_update_installer, install_update
+
+UI_TITLE = "별식당 메뉴 알림"
+TRAY_RUNNING_MESSAGE = "앱이 작업 표시줄 알림 영역에서 실행 중입니다."
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -60,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ui-layout-smoke-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--detail-layout-smoke-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--settings-responsiveness-smoke-test", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--latest-check-responsiveness-smoke-test", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--update-workflow-smoke-test", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--toast-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--toast-title", default="", help=argparse.SUPPRESS)
     parser.add_argument("--toast-body", default="", help=argparse.SUPPRESS)
@@ -104,6 +110,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_settings_app(start_minimized=True, ui_layout_test=True)
     if args.settings_responsiveness_smoke_test:
         return run_settings_app(settings_responsiveness_test=True)
+    if args.latest_check_responsiveness_smoke_test:
+        return run_settings_app(latest_check_responsiveness_test=True)
+    if args.update_workflow_smoke_test:
+        return run_settings_app(update_workflow_test=True)
     if not acquire_tray_instance():
         return 0
     return run_settings_app(start_minimized=args.minimized, first_run=args.first_run)
@@ -195,6 +205,8 @@ def run_settings_app(
     ui_layout_test: bool = False,
     scheduled_check: bool = False,
     settings_responsiveness_test: bool = False,
+    latest_check_responsiveness_test: bool = False,
+    update_workflow_test: bool = False,
 ) -> int:
     try:
         from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, QTime, Qt, Signal
@@ -242,8 +254,56 @@ def run_settings_app(
                 result = exc
             self.signals.finished.emit(result)
 
+    class LatestCheckWorkerSignals(QObject):
+        finished = Signal(object)
+
+    class LatestCheckWorker(QRunnable):
+        def __init__(self, checker=run_once) -> None:  # type: ignore[no-untyped-def]
+            super().__init__()
+            self.checker = checker
+            self.signals = LatestCheckWorkerSignals()
+
+        def run(self) -> None:
+            try:
+                result = self.checker(force_notify=True)
+            except Exception as exc:
+                result = exc
+            self.signals.finished.emit(result)
+
+    class UpdateWorkerSignals(QObject):
+        progress = Signal(str)
+        finished = Signal(object)
+
+    class UpdateWorker(QRunnable):
+        def __init__(self, checker=check_for_update, downloader=download_update_installer) -> None:  # type: ignore[no-untyped-def]
+            super().__init__()
+            self.checker = checker
+            self.downloader = downloader
+            self.signals = UpdateWorkerSignals()
+
+        def run(self) -> None:
+            try:
+                update = self.checker()
+                if update is None:
+                    result = (None, None)
+                else:
+                    self.signals.progress.emit(f"{update.tag_name} 업데이트를 다운로드하고 있습니다...")
+                    installer_path = self.downloader(update)
+                    result = (update, installer_path)
+            except Exception as exc:
+                result = exc
+            self.signals.finished.emit(result)
+
     class SettingsWindow(QWidget):
-        def __init__(self, auto_apply: bool = True, scheduler_registrar=register_task) -> None:  # type: ignore[no-untyped-def]
+        def __init__(
+            self,
+            auto_apply: bool = True,
+            scheduler_registrar=register_task,
+            latest_checker=run_once,
+            update_checker=check_for_update,
+            update_downloader=download_update_installer,
+            update_installer=install_update,
+        ) -> None:  # type: ignore[no-untyped-def]
             super().__init__()
             self.auto_apply = auto_apply
             self.pending_apply_message: str | None = None
@@ -258,10 +318,23 @@ def run_settings_app(
             self.scheduler_busy = False
             self.pending_scheduler_request: tuple[AppConfig, str, bool] | None = None
             self.active_scheduler_worker: SchedulerWorker | None = None
+            self.first_run_check_pending = first_run
             self.scheduler_pool = QThreadPool(self)
             self.scheduler_pool.setMaxThreadCount(1)
             self.scheduler_registrar = scheduler_registrar
-            self.setWindowTitle(APP_TITLE)
+            self.latest_check_busy = False
+            self.active_latest_check_worker: LatestCheckWorker | None = None
+            self.latest_check_pool = QThreadPool(self)
+            self.latest_check_pool.setMaxThreadCount(1)
+            self.latest_checker = latest_checker
+            self.update_busy = False
+            self.active_update_worker: UpdateWorker | None = None
+            self.update_pool = QThreadPool(self)
+            self.update_pool.setMaxThreadCount(1)
+            self.update_checker = update_checker
+            self.update_downloader = update_downloader
+            self.update_installer = update_installer
+            self.setWindowTitle(UI_TITLE)
             self.setObjectName("AppRoot")
             self.setMinimumSize(520, 500)
             self.resize(580, 570)
@@ -362,23 +435,23 @@ def run_settings_app(
             self.action_grid.setHorizontalSpacing(8)
             self.action_grid.setVerticalSpacing(8)
 
-            check_button = QPushButton("최신 메뉴 확인")
-            check_button.setObjectName("PrimaryButton")
-            check_button.clicked.connect(self.check_latest_now)
+            self.check_button = QPushButton("최신 메뉴 확인")
+            self.check_button.setObjectName("PrimaryButton")
+            self.check_button.clicked.connect(self.check_latest_now)
             login_button = QPushButton("Instagram 로그인")
             login_button.clicked.connect(self.create_login_session)
-            update_button = QPushButton("업데이트 확인")
-            update_button.clicked.connect(self.check_updates)
+            self.update_button = QPushButton("업데이트 확인")
+            self.update_button.clicked.connect(self.check_updates)
             quit_button = QPushButton("종료")
             quit_button.setObjectName("QuietButton")
             quit_button.clicked.connect(self.quit_from_tray)
 
-            self.action_grid.addWidget(check_button, 0, 0)
+            self.action_grid.addWidget(self.check_button, 0, 0)
             self.action_grid.addWidget(login_button, 0, 1)
-            self.action_grid.addWidget(update_button, 1, 0)
+            self.action_grid.addWidget(self.update_button, 1, 0)
             self.action_grid.addWidget(quit_button, 1, 1)
             button_layout.addLayout(self.action_grid)
-            self.action_buttons = [check_button, login_button, update_button, quit_button]
+            self.action_buttons = [self.check_button, login_button, self.update_button, quit_button]
             root.addWidget(button_card)
 
             status_card = QFrame()
@@ -403,7 +476,7 @@ def run_settings_app(
             self.start_on_boot.toggled.connect(lambda _checked: self.queue_settings_apply("자동 실행 설정이 적용되었습니다."))
             self.refresh_status()
             if self.auto_apply:
-                self.apply_settings(show_message=first_run)
+                self.apply_settings(show_message=False)
 
         def _card(self, minimum_height: int | None = None) -> QFrame:
             frame = QFrame()
@@ -526,7 +599,14 @@ def run_settings_app(
                 return
 
             if self.quit_requested:
+                if self.latest_check_busy or self.update_busy:
+                    return
                 self._finish_quit()
+                return
+
+            if self.first_run_check_pending:
+                self.first_run_check_pending = False
+                QTimer.singleShot(0, self.check_latest_on_first_run)
 
         def _finish_quit(self) -> None:
             self.really_quit = True
@@ -539,20 +619,51 @@ def run_settings_app(
             self.notify_tray("테스트 알림을 실행합니다.", timeout=1500)
             QApplication.processEvents()
             result = run_once(force_mock=True, force_notify=True)
-            self.refresh_status(f"테스트 알림 실행 완료: exit {result}")
-            self.notify_tray(f"테스트 알림 실행 완료: exit {result}")
+            self.refresh_status(f"테스트 알림 실행 완료(종료 코드: {result})")
+            self.notify_tray(f"테스트 알림 실행 완료(종료 코드: {result})")
 
         def check_latest_now(self) -> None:
+            self._start_latest_check()
+
+        def check_latest_on_first_run(self) -> None:
+            self._start_latest_check()
+
+        def _start_latest_check(self) -> None:
+            if self.latest_check_busy:
+                self.refresh_status("최신 메뉴를 이미 확인 중입니다.")
+                return
             self._save_settings()
             self.refresh_status("최신 게시물 이미지를 확인하고 알림을 보내는 중입니다...")
-            self.notify_tray("최신 게시물을 확인합니다.", timeout=1500)
-            QApplication.processEvents()
-            result = run_once(force_notify=True)
-            self.refresh_status(f"최신 게시물 확인 완료: exit {result}")
-            if result == 0:
-                self.notify_tray("최신 게시물 확인을 완료했습니다.")
-            else:
+            self.latest_check_busy = True
+            self.check_button.setEnabled(False)
+            self.check_button.setText("최신 메뉴 확인 중...")
+            worker = LatestCheckWorker(self.latest_checker)
+            self.active_latest_check_worker = worker
+            worker.signals.finished.connect(self._latest_check_finished)
+            self.latest_check_pool.start(worker)
+
+        def _latest_check_finished(self, result: object) -> None:
+            self.latest_check_busy = False
+            self.active_latest_check_worker = None
+            self.check_button.setEnabled(True)
+            self.check_button.setText("최신 메뉴 확인")
+            if isinstance(result, Exception):
+                self.state_store.update(last_result="최신 게시물 확인 실패", last_error=str(result))
+                self.refresh_status(f"최신 게시물 확인 실패: {result}")
                 self.notify_tray("최신 게시물 확인에 실패했습니다.")
+            elif result != 0:
+                self.refresh_status()
+                self.notify_tray("최신 게시물 확인에 실패했습니다.")
+            else:
+                self.refresh_status()
+
+            if (
+                self.quit_requested
+                and not self.scheduler_busy
+                and self.pending_scheduler_request is None
+                and not self.update_busy
+            ):
+                self._finish_quit()
 
         def open_last_detail(self) -> None:
             post_id = self.state_store.load().get("last_notified_post_id")
@@ -577,32 +688,67 @@ def run_settings_app(
             self.notify_tray("Instagram 로그인 세션 창을 열었습니다.")
 
         def check_updates(self) -> None:
-            self._save_settings()
+            if self.update_busy:
+                self.refresh_status("업데이트를 이미 확인 중입니다.")
+                return
             self.refresh_status(f"GitHub 릴리즈에서 최신 버전을 확인하는 중입니다... 현재 버전: {APP_VERSION}")
-            self.notify_tray("업데이트를 확인합니다.", timeout=1500)
-            QApplication.processEvents()
-            try:
-                update = check_for_update()
-                if not update:
-                    message = f"현재 최신 버전입니다. ({APP_VERSION})"
-                    self.refresh_status(message)
-                    self.notify_tray(message)
-                    return
+            self.update_busy = True
+            self.update_button.setEnabled(False)
+            self.update_button.setText("업데이트 확인 중...")
+            worker = UpdateWorker(self.update_checker, self.update_downloader)
+            self.active_update_worker = worker
+            worker.signals.progress.connect(self.refresh_status)
+            worker.signals.finished.connect(self._update_finished)
+            self.update_pool.start(worker)
 
-                self.refresh_status(f"{update.tag_name} 업데이트를 다운로드하고 있습니다...")
-                QApplication.processEvents()
-                installer_path = download_update_installer(update)
-                self.refresh_status(f"{update.tag_name} 설치 파일 검증 완료. 업데이트 설치를 시작합니다.")
-                self.notify_tray("업데이트 설치를 시작합니다. 앱이 곧 종료됩니다.")
-                QApplication.processEvents()
-                install_update(installer_path)
-                self.really_quit = True
-                QApplication.instance().quit()
-            except UpdateError as exc:
-                message = f"업데이트 확인 실패: {exc}"
-                self.state_store.update(last_error=str(exc), last_result="업데이트 확인 실패")
+        def _update_finished(self, result: object) -> None:
+            self.update_busy = False
+            self.active_update_worker = None
+            self.update_button.setEnabled(True)
+            self.update_button.setText("업데이트 확인")
+            if isinstance(result, Exception):
+                message = f"업데이트 확인 실패: {result}"
+                self.state_store.update(last_error=str(result), last_result="업데이트 확인 실패")
                 self.refresh_status(message)
                 self.notify_tray("업데이트 확인에 실패했습니다.")
+                if (
+                    self.quit_requested
+                    and not self.scheduler_busy
+                    and self.pending_scheduler_request is None
+                    and not self.latest_check_busy
+                ):
+                    self._finish_quit()
+                return
+
+            update, installer_path = result
+            if update is None:
+                message = f"현재 최신 버전입니다. ({APP_VERSION})"
+                self.refresh_status(message)
+                self.notify_tray(message)
+                if (
+                    self.quit_requested
+                    and not self.scheduler_busy
+                    and self.pending_scheduler_request is None
+                    and not self.latest_check_busy
+                ):
+                    self._finish_quit()
+                return
+
+            self.refresh_status(f"{update.tag_name} 설치 파일 검증 완료. 업데이트 설치 후 자동으로 다시 실행합니다.")
+            self.notify_tray("업데이트 설치를 시작합니다. 설치 후 앱이 자동으로 다시 실행됩니다.")
+            QApplication.processEvents()
+            try:
+                self.update_installer(installer_path)
+            except Exception as exc:
+                message = f"업데이트 설치 시작 실패: {exc}"
+                self.state_store.update(last_error=str(exc), last_result="업데이트 설치 시작 실패")
+                self.refresh_status(message)
+                self.notify_tray("업데이트 설치를 시작하지 못했습니다.")
+                return
+            self.really_quit = True
+            self.quit_requested = False
+            self.tray_icon.hide()
+            QApplication.instance().quit()
 
         def install_task(self) -> None:
             self._save_settings()
@@ -629,11 +775,11 @@ def run_settings_app(
             self.refresh_status("예약된 알림 확인을 실행합니다.")
             QApplication.processEvents()
             result = run_once()
-            self.refresh_status(f"예약된 알림 확인 완료: exit {result}")
+            self.refresh_status(f"예약된 알림 확인 완료(종료 코드: {result})")
             if result != 0:
                 self.notify_tray("예약된 알림 확인에 실패했습니다.")
 
-        def notify_tray(self, message: str, title: str = APP_TITLE, timeout: int = 2500) -> None:
+        def notify_tray(self, message: str, title: str = UI_TITLE, timeout: int = 2500) -> None:
             tray_icon = getattr(self, "tray_icon", None)
             if tray_icon and tray_icon.isVisible():
                 tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, timeout)
@@ -647,7 +793,7 @@ def run_settings_app(
 
         def create_tray_icon(self) -> None:
             self.tray_icon = QSystemTrayIcon(self.app_icon, self)
-            self.tray_icon.setToolTip(APP_TITLE)
+            self.tray_icon.setToolTip(UI_TITLE)
             self.tray_menu = QMenu(self)
             self.tray_actions: list[QAction] = []
             self.add_tray_action("설정창 열기", self.show_settings_from_tray)
@@ -681,6 +827,16 @@ def run_settings_app(
                 self.refresh_status(message)
                 self.notify_tray(message)
                 return
+            if self.latest_check_busy:
+                message = "최신 메뉴 확인을 마친 뒤 종료합니다. 창은 계속 응답합니다."
+                self.refresh_status(message)
+                self.notify_tray(message)
+                return
+            if self.update_busy:
+                message = "업데이트 확인을 마친 뒤 종료합니다. 창은 계속 응답합니다."
+                self.refresh_status(message)
+                self.notify_tray(message)
+                return
             self._finish_quit()
 
         def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -692,7 +848,7 @@ def run_settings_app(
             event.ignore()
             self.hide()
             self.tray_icon.showMessage(
-                APP_TITLE,
+                UI_TITLE,
                 "설정창은 닫혔지만 트레이에서 계속 실행 중입니다.",
                 QSystemTrayIcon.MessageIcon.Information,
                 2500,
@@ -714,7 +870,7 @@ def run_settings_app(
             self.status.setText("\n".join(lines))
 
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setApplicationDisplayName(APP_TITLE)
+    app.setApplicationDisplayName(UI_TITLE)
     app.setWindowIcon(load_app_icon())
     app.setQuitOnLastWindowClosed(False)
     scheduler_registrar = register_task
@@ -725,9 +881,52 @@ def run_settings_app(
 
         scheduler_registrar = slow_test_registrar
 
+    latest_checker = run_once
+    if latest_check_responsiveness_test:
+        def slow_latest_checker(**_kwargs: object) -> int:
+            time.sleep(0.8)
+            return 0
+
+        latest_checker = slow_latest_checker
+
+    update_checker = check_for_update
+    update_downloader = download_update_installer
+    update_installer = install_update
+    update_workflow_state: dict[str, object] = {}
+    if update_workflow_test:
+        simulated_update = SimpleNamespace(tag_name="v9.9.9")
+        simulated_installer_path = BASE_DIR / "simulated-update.exe"
+
+        def simulated_update_checker():  # type: ignore[no-untyped-def]
+            update_workflow_state["checked"] = True
+            time.sleep(0.8)
+            return simulated_update
+
+        def simulated_update_downloader(update):  # type: ignore[no-untyped-def]
+            update_workflow_state["downloaded"] = update.tag_name
+            return simulated_installer_path
+
+        def simulated_update_installer(path: Path):  # type: ignore[no-untyped-def]
+            update_workflow_state["installed"] = path
+            return SimpleNamespace(pid=0)
+
+        update_checker = simulated_update_checker
+        update_downloader = simulated_update_downloader
+        update_installer = simulated_update_installer
+
     window = SettingsWindow(
-        auto_apply=not (smoke_test or ui_layout_test or settings_responsiveness_test),
+        auto_apply=not (
+            smoke_test
+            or ui_layout_test
+            or settings_responsiveness_test
+            or latest_check_responsiveness_test
+            or update_workflow_test
+        ),
         scheduler_registrar=scheduler_registrar,
+        latest_checker=latest_checker,
+        update_checker=update_checker,
+        update_downloader=update_downloader,
+        update_installer=update_installer,
     )
     if scheduled_check and not QSystemTrayIcon.isSystemTrayAvailable():
         window.really_quit = True
@@ -863,14 +1062,96 @@ def run_settings_app(
         print(f"Settings responsiveness smoke test passed: tick_delay={tick_delay:.3f}")
         return 0
 
+    if latest_check_responsiveness_test:
+        result: dict[str, float | bool] = {"tick_delay": 99.0, "timed_out": False}
+        started_at = time.perf_counter()
+
+        def record_latest_ui_tick() -> None:
+            result["tick_delay"] = time.perf_counter() - started_at
+
+        def wait_for_latest_check() -> None:
+            if window.latest_check_busy:
+                QTimer.singleShot(20, wait_for_latest_check)
+                return
+            QApplication.instance().quit()
+
+        def fail_latest_on_timeout() -> None:
+            result["timed_out"] = True
+            window.really_quit = True
+            QApplication.instance().quit()
+
+        QTimer.singleShot(50, record_latest_ui_tick)
+        QTimer.singleShot(20, wait_for_latest_check)
+        QTimer.singleShot(3000, fail_latest_on_timeout)
+        window.check_latest_now()
+        app.exec()
+        tick_delay = float(result["tick_delay"])
+        if bool(result["timed_out"]) or tick_delay >= 0.3 or window.latest_check_busy:
+            print(f"Latest check responsiveness smoke test failed: tick_delay={tick_delay:.3f}")
+            return 1
+        print(f"Latest check responsiveness smoke test passed: tick_delay={tick_delay:.3f}")
+        return 0
+
+    if update_workflow_test:
+        result: dict[str, float | bool] = {
+            "tick_delay": 99.0,
+            "dispatch_delay": 99.0,
+            "tick_started_at": 0.0,
+            "timed_out": False,
+        }
+
+        def record_update_ui_tick() -> None:
+            result["tick_delay"] = time.perf_counter() - float(result["tick_started_at"])
+
+        def start_update_workflow() -> None:
+            dispatch_started_at = time.perf_counter()
+            window.check_updates()
+            result["dispatch_delay"] = time.perf_counter() - dispatch_started_at
+            result["tick_started_at"] = time.perf_counter()
+            QTimer.singleShot(50, record_update_ui_tick)
+
+        def fail_update_on_timeout() -> None:
+            result["timed_out"] = True
+            window.really_quit = True
+            QApplication.instance().quit()
+
+        QTimer.singleShot(150, start_update_workflow)
+        QTimer.singleShot(4000, fail_update_on_timeout)
+        app.exec()
+        tick_delay = float(result["tick_delay"])
+        dispatch_delay = float(result["dispatch_delay"])
+        expected_installer = BASE_DIR / "simulated-update.exe"
+        workflow_ok = (
+            update_workflow_state.get("checked") is True
+            and update_workflow_state.get("downloaded") == "v9.9.9"
+            and update_workflow_state.get("installed") == expected_installer
+        )
+        if (
+            bool(result["timed_out"])
+            or dispatch_delay >= 0.3
+            or tick_delay >= 0.3
+            or window.update_busy
+            or not workflow_ok
+        ):
+            print(
+                "Update workflow smoke test failed: "
+                f"dispatch_delay={dispatch_delay:.3f}, tick_delay={tick_delay:.3f}, state={update_workflow_state}"
+            )
+            return 1
+        print(
+            "Update workflow smoke test passed: "
+            f"dispatch_delay={dispatch_delay:.3f}, tick_delay={tick_delay:.3f}"
+        )
+        return 0
+
     if scheduled_check:
         QTimer.singleShot(0, window.run_scheduled_check)
 
     if (start_minimized or scheduled_check) and QSystemTrayIcon.isSystemTrayAvailable():
         window.hide()
         window.tray_icon.showMessage(
-            APP_TITLE,
-            "StarRestaurantRadar is running in the tray.",
+            UI_TITLE,
+            TRAY_RUNNING_MESSAGE,
             QSystemTrayIcon.MessageIcon.Information,
             2000,
         )

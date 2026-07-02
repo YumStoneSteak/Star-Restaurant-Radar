@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -13,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from config import APP_NAME, APP_PRODUCT_NAME, APP_TITLE, APP_TOAST_APP_ID, APP_VERSION, AppConfig, load_config, normalize_time
-from app import format_last_checked_at
+from app import TRAY_RUNNING_MESSAGE, UI_TITLE, format_last_checked_at
 from image_cache import ImageCacheService
 from instagram_client import (
     InstagramPost,
@@ -37,8 +38,11 @@ from state_store import StateStore
 from update_service import (
     ReleaseAsset,
     UpdateError,
+    UpdateInfo,
+    download_update_installer,
     extract_sha256,
     fetch_latest_release,
+    install_update,
     is_newer_version,
     parse_latest_release,
     select_installer_asset,
@@ -97,6 +101,59 @@ class CoreTests(unittest.TestCase):
             format_last_checked_at("2026-06-30T13:02:00+09:00", now),
             "2026년 6월 30일 오후 1:02",
         )
+
+    def test_tray_startup_message_is_fully_korean(self) -> None:
+        self.assertEqual(UI_TITLE, "별식당 메뉴 알림")
+        self.assertEqual(TRAY_RUNNING_MESSAGE, "앱이 작업 표시줄 알림 영역에서 실행 중입니다.")
+        self.assertNotRegex(TRAY_RUNNING_MESSAGE, r"[A-Za-z]")
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertNotIn("is running in the tray", app_source)
+        self.assertNotIn("완료: exit", app_source)
+
+    def test_first_run_checks_latest_without_completion_toast(self) -> None:
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn("self.first_run_check_pending = first_run", app_source)
+        self.assertIn("QTimer.singleShot(0, self.check_latest_on_first_run)", app_source)
+        self.assertIn("self._start_latest_check()", app_source)
+        self.assertIn("class LatestCheckWorker(QRunnable)", app_source)
+        self.assertNotIn('self.notify_tray("최신 게시물을 확인합니다."', app_source)
+        self.assertNotIn('self.notify_tray("최신 게시물 확인을 완료했습니다.")', app_source)
+
+    def test_forced_latest_check_uses_main_menu_notification(self) -> None:
+        now = datetime(2026, 7, 2, 9, 30, tzinfo=KST)
+        post = InstagramPost(
+            post_id="FirstRun1",
+            shortcode="FirstRun1",
+            permalink="https://www.instagram.com/p/FirstRun1/",
+            image_url=None,
+            thumbnail_url=None,
+            caption="today",
+            published_at=now,
+            media_type="image",
+        )
+        state_store = mock.Mock()
+        state_store.load.return_value = {}
+        client = mock.Mock()
+        client.get_latest_post.return_value = post
+        holiday = mock.Mock()
+        holiday.should_run.return_value = (True, "ok")
+        image_cache = mock.Mock()
+        image_path = ROOT / "cache" / "FirstRun1.jpg"
+        image_cache.cache_post_image.return_value = image_path
+        toast = mock.Mock()
+        toast.show_menu_notification.return_value = "알림 표시 요청 완료"
+
+        with mock.patch("main.load_config", return_value=AppConfig()), mock.patch(
+            "main.setup_logging"
+        ), mock.patch("main.StateStore", return_value=state_store), mock.patch(
+            "main.create_client", return_value=client
+        ), mock.patch("main.HolidayService", return_value=holiday), mock.patch(
+            "main.ImageCacheService", return_value=image_cache
+        ), mock.patch("main.ToastService", return_value=toast):
+            result = run_once(force_notify=True, now=now)
+
+        self.assertEqual(result, 0)
+        toast.show_menu_notification.assert_called_once_with(post, image_path)
 
     def test_notification_window_is_limited_to_one_hour_on_same_day(self) -> None:
         config = AppConfig(notification_time="10:00")
@@ -162,7 +219,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(APP_TITLE, "StarRestaurantRadar")
         self.assertEqual(APP_TOAST_APP_ID, "StarRestaurantRadar")
         self.assertEqual(APP_PRODUCT_NAME, "StarRestaurantRadar")
-        self.assertEqual(APP_VERSION, "1.2.0")
+        self.assertEqual(APP_VERSION, "2.0.0")
 
     def test_scheduler_uses_noninteractive_source_check(self) -> None:
         executable, arguments = task_target()
@@ -411,6 +468,37 @@ class CoreTests(unittest.TestCase):
 
         self.assertIsNotNone(asset)
         self.assertEqual(asset.name, "StarRestaurantRadar-Setup.exe")
+
+    def test_automatic_update_requires_sha256_asset(self) -> None:
+        update = UpdateInfo(
+            tag_name="v9.9.9",
+            version="9.9.9",
+            html_url="https://example.test/release",
+            installer_asset=ReleaseAsset(
+                "StarRestaurantRadar-Setup-v9.9.9.exe",
+                "https://example.test/installer",
+            ),
+            checksum_asset=None,
+        )
+
+        with self.assertRaisesRegex(UpdateError, "SHA256"):
+            download_update_installer(update)
+
+    def test_install_update_uses_silent_install_and_relaunch(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            installer_path = Path(temp_dir) / "StarRestaurantRadar-Setup-v9.9.9.exe"
+            installer_path.write_bytes(b"installer")
+            process = mock.Mock()
+            with mock.patch("update_service.subprocess.Popen", return_value=process) as popen:
+                result = install_update(installer_path)
+
+        self.assertIs(result, process)
+        args, kwargs = popen.call_args
+        self.assertEqual(args[0], [str(installer_path), "/S", "/LAUNCH=1"])
+        self.assertEqual(kwargs["cwd"], installer_path.parent)
+        self.assertTrue(kwargs["close_fds"])
 
     def test_fetch_latest_release_uses_ssl_context(self) -> None:
         class FakeResponse:

@@ -139,7 +139,7 @@ class ImageCacheService:
         draw = ImageDraw.Draw(image)
         draw.rounded_rectangle((70, 70, 890, 890), radius=36, fill="#ffffff", outline="#d6c7b3", width=4)
         draw.text((130, 310), "Byeolsikdang", fill="#2a2a2a")
-        draw.text((130, 370), "Menu notification test", fill="#5f5a54")
+        draw.text((130, 370), "별식당 메뉴 알림 테스트", fill="#5f5a54")
         draw.text((130, 450), post_id, fill="#8c6f4f")
         image.save(target, format="JPEG", quality=88)
         return target

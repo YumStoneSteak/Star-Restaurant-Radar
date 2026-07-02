@@ -11,7 +11,7 @@ RequestExecutionLevel user
 !define APP_DISPLAY_NAME "StarRestaurantRadar"
 !define APP_PRODUCT_NAME "StarRestaurantRadar"
 !ifndef APP_VERSION
-!define APP_VERSION "1.2.0"
+!define APP_VERSION "2.0.0"
 !endif
 !define APP_PUBLISHER "YumStoneSteak"
 !define APP_REPO_URL "https://github.com/YumStoneSteak/Star-Restaurant-Radar"

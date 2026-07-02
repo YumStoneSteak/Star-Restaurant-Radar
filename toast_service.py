@@ -26,7 +26,7 @@ class ToastService:
             body = "메뉴가 올라왔어요."
 
         if self.config.notification_mode != "windows_toast":
-            return "알림 방식이 Windows Toast가 아니어서 건너뜀"
+            return "지원하는 알림 방식이 아니어서 건너뜀"
 
         result = self._show_with_win11toast(title, body, image_path, post.permalink)
         if result:
@@ -34,7 +34,7 @@ class ToastService:
         result = self._show_with_powershell(title, body)
         if result:
             return result
-        return "Toast 라이브러리가 설치되어 있지 않아 알림을 표시하지 못함"
+        return "알림 구성 요소가 없어 알림을 표시하지 못함"
 
     def open_latest_detail(self, post_id: str) -> None:
         subprocess.Popen([sys.executable, str(BASE_DIR / "app.py"), "--detail", post_id], close_fds=True)
@@ -90,7 +90,7 @@ class ToastService:
                 close_fds=True,
                 creationflags=creationflags,
             )
-            return "Windows Toast 알림 실행 요청 완료"
+            return "알림 표시 요청 완료"
         except OSError:
             LOGGER.exception("Could not launch toast worker.")
             return None
@@ -110,7 +110,7 @@ class ToastService:
                 ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script],
                 close_fds=True,
             )
-            return "Toast 대체 MessageBox 표시 완료"
+            return "대체 알림창 표시 완료"
         except OSError:
             LOGGER.exception("PowerShell MessageBox fallback failed.")
             return None

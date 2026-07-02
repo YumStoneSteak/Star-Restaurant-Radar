@@ -155,15 +155,17 @@ def parse_version(value: str) -> tuple[int, int, int]:
 
 
 def download_update_installer(update: UpdateInfo) -> Path:
+    if update.checksum_asset is None:
+        raise UpdateError("자동 업데이트에 필요한 SHA256 검증 파일이 릴리즈에 없습니다.")
+
     update_dir = Path(tempfile.gettempdir()) / "StarRestaurantRadarUpdate" / update.tag_name
     update_dir.mkdir(parents=True, exist_ok=True)
     installer_path = update_dir / update.installer_asset.name
     download_asset(update.installer_asset, installer_path)
 
-    if update.checksum_asset:
-        checksum_path = update_dir / update.checksum_asset.name
-        download_asset(update.checksum_asset, checksum_path)
-        verify_sha256_file(installer_path, checksum_path.read_text(encoding="utf-8"))
+    checksum_path = update_dir / update.checksum_asset.name
+    download_asset(update.checksum_asset, checksum_path)
+    verify_sha256_file(installer_path, checksum_path.read_text(encoding="utf-8"))
     return installer_path
 
 
@@ -205,14 +207,18 @@ def install_update(installer_path: Path) -> subprocess.Popen:
     if not installer_path.exists():
         raise UpdateError(f"설치 파일이 없습니다: {installer_path}")
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return subprocess.Popen(
-        [str(installer_path), "/S", "/LAUNCH=1"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        creationflags=creationflags,
-    )
+    try:
+        return subprocess.Popen(
+            [str(installer_path), "/S", "/LAUNCH=1"],
+            cwd=installer_path.parent,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=creationflags,
+        )
+    except OSError as exc:
+        raise UpdateError(f"업데이트 설치 파일을 실행하지 못했습니다: {installer_path}") from exc
 
 
 def running_from_frozen_app() -> bool:
